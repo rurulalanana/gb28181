@@ -672,8 +672,8 @@ async function playTile(tile) {
 
   await player.play(streamId, urls, {
     proto: proto.value,
-    // 电视墙多格同播：一格出声就是一墙回声，保持静音（单画面视图才自动开声音）
-    keepMuted: true,
+    // 多格同播才静音（一格出声就是一墙回声）；只开一路画面时正常出声，省得用户再去点喇叭
+    keepMuted: usedKeys.value.size > 1,
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
     onStall: () => rebuildStalled(tile),
     // 播放器自动改协议时同步顶部下拉（典型：FLV 解码失败重试耗尽 → 切 WebRTC）。
