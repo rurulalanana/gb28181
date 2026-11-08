@@ -556,25 +556,38 @@ export function useLivePlayer(containerRef, hooks = {}) {
       })
     )
 
-    // 倍速：ratechange → 国标 Scale（设备侧变速推流）；本地也必须同倍速消耗，否则缓冲一直涨
-    let lastRate = 1
+    /*
+     * 倍速：ratechange → 国标 Scale（设备侧变速推流），本地强制留在 1 倍速。
+     *
+     * 控制栏自带的倍速菜单会直接改 video.playbackRate。源流是按实时速率到达的，
+     * 本地再乘一遍倍速会几秒抽干缓冲、画面停在缓冲末尾等数据（「2 倍速播不下去」）。
+     * 所以这里不改本地速率：把本地钉回 1，只把速率意图转成 SIP Scale 交给设备。
+     * 页面自己的倍速下拉也走 {@link setPlaybackRate}，行为一致。
+     */
     unsubs.push(
       engine.on('ratechange', () => {
         if (disposed) return
         const media = engine.videoEl
-        const rate = media ? media.playbackRate : 1
-        if (!Number.isFinite(rate) || rate === lastRate) return
-        lastRate = rate
+        if (!media) return
+        const rate = media.playbackRate
+        // 只转发「加快」意图：钉回 1 引发的回落事件不能被当成用户要求恢复 1 倍速
+        if (!Number.isFinite(rate) || rate === 1) return
+        try {
+          media.playbackRate = 1
+        } catch (e) {
+          // 忽略：个别内核不允许改回
+        }
         if (typeof vod.onRate === 'function') vod.onRate(rate)
       })
     )
   }
 
   /**
-   * 调整本地播放速率（回放倍速的客户端那一半）。
+   * 表达「我要 N 倍速」——**不改本地播放速率**，只触发一次 ratechange，
+   * 由 {@code bindVodControls} 把它转成国标 {@code Scale} 指令交给设备。
    *
-   * 国标倍速是设备侧 Scale，客户端不跟着加速的话缓冲会一路涨（延迟越来越大），
-   * 而不是快放。设 playbackRate 会触发 ratechange，由 bindVodControls 转成 SIP Scale。
+   * <p>为什么不能真改：设备录像按实时速率到达，本地 2 倍速会在几秒内抽干缓冲，
+   * 画面停在缓冲末尾等数据，表现就是「2 倍速卡死」。真正加速只能靠设备按 Scale 推流。
    *
    * @param {number} rate 1 为正常
    * @returns {boolean} 播放器未就绪时返回 false
@@ -583,6 +596,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     const media = engine && engine.videoEl
     if (!media) return false
     try {
+      // 先写目标值触发 ratechange（监听器会立刻把它钉回 1），语义由业务层转成 Scale
       media.playbackRate = rate
       return true
     } catch (e) {

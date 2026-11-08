@@ -35,7 +35,7 @@
             <el-select
               v-model="playRate"
               class="pb-sel pb-sel-rate"
-              title="回放倍速（国标 Scale，由设备侧变速推流）"
+              title="回放倍速：发国标 INFO Scale 由设备变速推流；浏览器按实时速率渲染，设备不支持时仍是 1 倍速但不会卡顿"
               @change="onRateChange"
             >
               <el-option :value="0.5" label="0.5 倍速" />
@@ -43,11 +43,6 @@
               <el-option :value="2" label="2 倍速" />
               <el-option :value="4" label="4 倍速" />
             </el-select>
-            <span
-              v-if="speedMode === 'jump'"
-              class="pb-speed-hint"
-              title="该设备不支持信令变速，正在用「连续跳播」模拟快放"
-            >跳播快进</span>
             <span class="cms-gap" />
             <button
               v-if="canDownload"
@@ -696,8 +691,6 @@ async function play(row, opts = {}) {
   segmentSeconds.value = segmentLengthOf(row)
   // 本段从第 offset 秒开始推，媒体时间轴的 0 点对应段内这个位置
   positionOffset.value = offset
-  // 新会话一律回 1 倍速：设备按 INVITE 时的速率起推，本地若停在上段的 2 倍速会立刻抽干缓冲
-  clearRateWatch()
   if (seekTimer) {
     clearTimeout(seekTimer)
     seekTimer = null
@@ -705,12 +698,6 @@ async function play(row, opts = {}) {
   pendingSeek = null
   clearSeeking()
   clearSeekFallback()
-  // 新会话设备从 1 倍速起推，本地记录的「已下发倍速」也要同步归位
-  deviceRate = 1
-  speedMode.value = 'device'
-  if (playRate.value !== 1) {
-    playRate.value = 1
-  }
   await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
@@ -754,6 +741,14 @@ async function play(row, opts = {}) {
       }
     }
   })
+  /*
+   * 重新 INVITE 后设备回到 1 倍速，把用户选定的倍速补发回去 ——
+   * 拖动定位 / 卡顿重拉都会走这里，否则「设了 2 倍速，拖一下进度条就变回 1 倍速」。
+   * 不能放在 play() 开头：会话刚建、INFO 可能早于设备侧回 ACK 而丢失。
+   */
+  if (playRate.value !== 1) {
+    await control('scale', { scale: playRate.value })
+  }
 }
 
 /** 把 {"YYYY-MM-DDTHH:mm:ss"} 加上若干秒，返回同格式字符串。 */
@@ -1053,166 +1048,31 @@ const playhead = computed(() => {
 })
 
 /**
- * 倍速切换。不能只改本地 playbackRate：拿到的是设备按实时速率推的流，本地 2 倍速
- * 几秒就把缓冲抽干，真正加速只能让设备发 Scale。
+ * 倍速切换，与 WVP 完全一致：**只发国标 {@code INFO + Scale}，本地永远 1 倍速**。
  *
- * Scale 是「请求」不是「保证」：南坑水库（下级平台）收到 Scale: 2.0 后直接停推，
- * 媒体源被注销、播放器 404。判据不能用「媒体时间走了多少」—— 缓冲富余时它总按
- * 本地速率走。改为只发指令、本地保持 1 倍速，4 秒后看已缓冲末尾前进了多少秒
- * （只随收到的数据量走）。不达标就记入本地黑名单，改用跳播快进。
+ * <p>WVP 对照：{@code record.vue#changePlaySpeed} 先调 {@code playback/setSpeed}
+ * （后端 {@code SIPCommander#playSpeedCmd} 发 {@code INFO Scale: %.6f}），再调播放器
+ * {@code setPlaybackRate} —— 而 jessibuca 的 {@code setPlaybackRate} 是空实现
+ * （{@code jessibuca.vue:278}），所以真正生效的只有设备侧 Scale。
+ *
+ * <p>本平台实测（三郎沟，2026-11-09）：发一次 {@code Scale: 2} 后，
+ * 固定 10 秒墙钟内到达的媒体从 11.9 秒涨到 20.2 秒（≈2x），发 {@code Scale: 1} 后
+ * 立刻回到 12.1 秒 —— 设备是认 Scale 的。
+ *
+ * <p>因此绝不能在本地改 {@code playbackRate}：源流按设备速率实时到达，
+ * 本地再乘一遍倍速会几秒抽干缓冲，{@code <video>} 停在缓冲末尾等数据，
+ * 表现就是「2 倍速/4 倍速画面卡死播不下去」。之前的「跳播快进」同理
+ * （每 2 秒一次 SEEK，设备每次都要重新找关键帧，缓冲永远填不满），已删除。
  */
 async function onRateChange(rate) {
-  clearRateWatch()
   playRate.value = rate
   if (!current.value) return
-
-  if (rate === 1) {
-    player.setPlaybackRate(1)
-    speedMode.value = 'device'
-    // 只有确实让设备加速过才需要复位，否则又是一条可能把流打死的指令
-    if (deviceRate !== 1) {
-      deviceRate = 1
-      await control('scale', { scale: 1 })
-    }
+  const ok = await control('scale', { scale: rate })
+  if (!ok) {
+    // 指令没发出去（会话已关等）：回 1 倍速，别让下拉停在假状态
+    playRate.value = 1
     return
   }
-
-  if (speedUnsupported.has(speedKey())) {
-    startJumpSpeed()
-    return
-  }
-
-  await control('scale', { scale: rate })
-  const startBuffer = player.bufferEnd()
-  const startAt = Date.now()
-  rateWatchTimer = setTimeout(async () => {
-    rateWatchTimer = null
-    if (playRate.value !== rate) return
-    const elapsed = (Date.now() - startAt) / 1000
-    const advanced = player.bufferEnd() - startBuffer
-    if (advanced >= elapsed * rate * 0.6) {
-      deviceRate = rate
-      player.setPlaybackRate(rate)
-      speedMode.value = 'device'
-      return
-    }
-    markSpeedUnsupported()
-    deviceRate = 1
-    /*
-     * 先把设备那侧的 Scale 复位成 1 再开始跳播。
-     *
-     * <p>万一设备其实认 Scale（只是本地判据在 WebRTC 下失效），
-     * 不复位就会「设备 2 倍速 × 本地跳播 2 倍速」= 实际 4 倍速。
-     */
-    await control('scale', { scale: 1 })
-    ElMessage.warning('该设备不支持信令变速，改用跳播快进（画面按段向前跳）')
-    startJumpSpeed()
-  }, 4000)
-}
-
-/** 当前倍速的实现方式：{@code device} = 设备侧 Scale，{@code jump} = 本地跳播。 */
-const speedMode = ref('device')
-
-/** 最近一次成功下发给设备的倍速，用于判断要不要发复位指令。 */
-let deviceRate = 1
-
-/** 变速失败过的通道，按「设备/通道」记在本地，避免每次重试都把流打死。 */
-const SPEED_UNSUPPORTED_KEY = 'gb.playback.speedUnsupported'
-
-function loadSpeedUnsupported() {
-  try {
-    const raw = localStorage.getItem(SPEED_UNSUPPORTED_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch (e) {
-    return []
-  }
-}
-
-const speedUnsupported = new Set(loadSpeedUnsupported())
-
-function speedKey() {
-  return `${serial.value}/${code.value}`
-}
-
-function markSpeedUnsupported() {
-  speedUnsupported.add(speedKey())
-  try {
-    localStorage.setItem(SPEED_UNSUPPORTED_KEY, JSON.stringify([...speedUnsupported]))
-  } catch (e) {
-    // 隐私模式禁写：本次会话内记住就够了
-  }
-}
-
-/** 跳播快进的定时器句柄。 */
-let jumpTimer = null
-
-/**
- * 跳播快进：设备支持 npt 却不支持 Scale，用连续跳播模拟（2 倍速 = 每 2 秒墙钟跳 4 秒）。
- *
- * <p><b>步长必须从「内容位置」算，不能从媒体时钟算</b>：媒体时钟只表示
- * 「这段流收了多久」，恒按 1 倍速走；内容位置 = {@code positionOffset + 媒体时钟}。
- * 早先直接拿媒体时钟加步长，目标点每跳只前进「墙钟秒数」（1 倍速），
- * 于是跳播形同虚设 —— 日志里能看到的症状是：2 倍速下每 2 秒一次的 SEEK，
- * range 每次只 +2 秒而不是 +4 秒。
- */
-function startJumpSpeed() {
-  clearJumpTimer()
-  speedMode.value = 'jump'
-  player.setPlaybackRate(1)
-  const STEP_MS = 2000
-  jumpTimer = setInterval(async () => {
-    if (!current.value) return
-    if (playRate.value === 1) {
-      clearJumpTimer()
-      speedMode.value = 'device'
-      return
-    }
-    const media = player.position.value || 0
-    const content = (positionOffset.value || 0) + media
-    const next = Math.floor(content + (playRate.value * STEP_MS) / 1000)
-    const duration = Number(segmentSeconds.value) || 0
-    if (duration > 0 && next >= duration - 2) {
-      // 到段尾：交回正常播放/切段逻辑，别把设备跳到越界位置
-      clearJumpTimer()
-      playRate.value = 1
-      speedMode.value = 'device'
-      ElMessage.info('已到本段末尾')
-      return
-    }
-    try {
-      await playbackApi.control({
-        streamid: playbackKey.value,
-        serial: serial.value,
-        code: code.value,
-        command: 'seek',
-        range: next
-      })
-      positionOffset.value = Math.max(0, next - media)
-    } catch (e) {
-      clearJumpTimer()
-      playRate.value = 1
-      speedMode.value = 'device'
-      ElMessage.warning(e.message || '跳播快进失败，已恢复 1 倍速')
-    }
-  }, STEP_MS)
-}
-
-function clearJumpTimer() {
-  if (jumpTimer) {
-    clearInterval(jumpTimer)
-    jumpTimer = null
-  }
-}
-
-/** 倍速生效性检查的定时器。 */
-let rateWatchTimer = null
-
-function clearRateWatch() {
-  if (rateWatchTimer) {
-    clearTimeout(rateWatchTimer)
-    rateWatchTimer = null
-  }
-  clearJumpTimer()
 }
 
 /**
@@ -1309,8 +1169,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (nowTimer) clearInterval(nowTimer)
   nowTimer = null
-  // 清掉定位防抖与倍速检查的定时器，否则组件销毁后仍会对已失效会话发请求
-  clearRateWatch()
+  // 清掉定位防抖，否则组件销毁后仍会对已失效会话发请求
   if (seekTimer) {
     clearTimeout(seekTimer)
     seekTimer = null
@@ -1519,6 +1378,7 @@ onUnmounted(() => {
  * 用 :deep 是因为控制栏是 LivePlayer 运行时注入的 DOM，没有本组件的 scopeId。
  */
 .pb-player :deep(.vjs-live-control),
+.pb-player :deep(.vjs-playback-rate),
 .pb-player :deep(.vjs-seek-to-live-control),
 .pb-player :deep(.vjs-chapters-button),
 .pb-player :deep(.vjs-descriptions-button),
@@ -1566,20 +1426,6 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 18px;
   pointer-events: none;
-}
-
-/* 倍速降级提示：只占文字宽度，别把工具栏撑开 */
-.pb-speed-hint {
-  margin-left: 6px;
-  padding: 0 6px;
-  height: 22px;
-  line-height: 22px;
-  border: 1px solid #e6a23c;
-  border-radius: 3px;
-  color: #b88230;
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: help;
 }
 
 /* ==================== 时间轴（1:1 对齐 CMS） ==================== */
