@@ -1,0 +1,483 @@
+server:
+  port: 8080
+  shutdown: graceful
+  compression:
+    # 开启 gzip：jessibuca 的 decoder.wasm 有 1MB，
+    # 公网链路上未压缩传输实测会被中间网关掐断
+    # （ERR_CONTENT_LENGTH_MISMATCH + 502），压缩后约 350KB 就稳了。
+    # 顺带把前端 JS/CSS 也压了，首屏更快。
+    enabled: true
+    mime-types: application/wasm,application/javascript,text/javascript,text/css,text/html,application/json,application/xml,image/svg+xml
+    min-response-size: 2048
+
+spring:
+  application:
+    name: gb28181-platform-starter
+  # ==================== 定时任务线程池 ====================
+  # 【必须配置】Spring Boot 默认 pool.size=1，所有 @Scheduled 共用一个线程。
+  # 本平台有 8 个定时任务（心跳巡检、录像对账、录像保活、空闲流回收、
+  # 孤儿流认领、磁盘清理、操作日志清理、状态日志清理），一旦某个慢下来
+  # （录像对账要递归遍历整个录像目录、磁盘清理要删大量文件），
+  # 其它任务全被推迟 —— 表现为「设备掉线了但界面迟迟不更新」。
+  #
+  # 取 4：足够让耗时的清理类任务与秒级的巡检类任务互不阻塞，
+  # 又不至于让并发事务数过多。
+  task:
+    scheduling:
+      pool:
+        size: 4
+      thread-name-prefix: gb-sched-
+  jackson:
+    default-property-inclusion: non_null
+  datasource:
+    # 【不要把密码写在这里】
+    # 本文件会被打进 jar 并提交到 Git 仓库，写死等于公开凭据。
+    # 密码一律通过环境变量注入；下方默认值只留给本地开发。
+    url: ${GB_DB_URL:jdbc:postgresql://160.202.254.65:25432/gb28181}
+    username: ${GB_DB_USERNAME:postgres}
+    password: ${GB_DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
+# ==================== MyBatis-Plus ====================
+mybatis-plus:
+  # 实体类所在包（配合 @MapperScan 在 MybatisPlusConfiguration 中声明）
+  type-aliases-package: io.github.rurulalanana.starter.entity
+  configuration:
+    # 下划线列名 -> 驼峰属性名（如 device_id -> deviceId）
+    map-underscore-to-camel-case: true
+    # 允许把 null 字段也写入 SQL（配合实体上的 @TableField 策略使用）
+    call-setters-on-nulls: true
+  global-config:
+    banner: false
+    db-config:
+      # 主键自增（对应建表脚本的 BIGSERIAL）
+      id-type: auto
+      # 逻辑删除字段（实体未使用，保留默认约定）
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+logging:
+  level:
+    io.github.rurulalanana: INFO
+    gov.nist.javax.sip: INFO
+    # SIP 协议栈逐包日志（每次 MESSAGE/INVITE/事务都打）量极大，
+    # 排障时临时改 DEBUG 即可；常开会让日志卷到百 MB 级并拖慢 IO。
+    io.github.rurulalanana.gb28181.sip: INFO
+    # 需要看 SQL 时打开下面这行
+    # io.github.rurulalanana.starter.mapper: DEBUG
+
+
+# ==================== 接口文档（Swagger + Knife4j） ====================
+# 业务平台按接口对接，所以文档是活文档（从 Controller 反射生成），不是手写 Markdown。
+#   /doc.html        Knife4j 中文界面（推荐给对接方）
+#   /swagger-ui.html 原生 Swagger UI
+#   /v3/api-docs     原始 OpenAPI JSON（可导入 Postman / Apifox / 生成 SDK）
+#   /v3/api-docs/business|cascade|public|system|webrtc  分组文档
+#
+# 这些路径不在 /api/v1/** 下，因此不过 Sa-Token 登录拦截——文档本身是公开的静态资源，
+# 真正的数据仍然要凭证才能取。接口清单会暴露全部路径/参数/结构，公网部署建议两者选一：
+#   1) gb28181.api-docs.enabled=false   彻底不注册文档端点
+#   2) gb28181.api-docs.protect=true    打开文档的 HTTP Basic 口令
+springdoc:
+  api-docs:
+    enabled: ${gb28181.api-docs.enabled:true}
+  swagger-ui:
+    enabled: ${gb28181.api-docs.enabled:true}
+    # 分组与接口都按声明顺序展示，避免中文标签被字母序打乱
+    tags-sorter: order
+    operations-sorter: method
+  default-produces-media-type: application/json
+
+# Knife4j 只用了它的静态 UI（/doc.html），没有引 starter（与 springdoc 2.6 字节码不兼容），
+# 所以这里没有 knife4j.* 配置项；文档口令保护由 ApiDocsProtectionFilter 负责。
+
+
+# ==================== Sa-Token ====================
+# 会话已持久化到 PostgreSQL（sa_token_store 表，见 SaTokenJdbcDao）：
+# 服务重启后已签发的 token 依然有效，用户无需重新登录。
+sa-token:
+  token-name: Authorization
+  # 有效期 7 天（秒）；active-timeout=-1 表示只要在有效期内就不因闲置被踢
+  timeout: 604800
+  active-timeout: -1
+  is-concurrent: true
+  is-share: false
+  token-style: uuid
+  is-log: false
+  is-read-cookie: false
+  is-read-header: true
+  # 从「请求参数」里读 token。
+  # <video src="..."> 这类请求带不了自定义头，只能把 token 拼在 URL 上，
+  # 录像文件播放（/cloudrecord/file/{id}）就靠这个通过鉴权。
+  is-read-body: true
+
+# ==================== 行为验证码（tianai-captcha）====================
+# 前缀必须是顶层 captcha（库的 SpringImageCaptchaProperties 读它），不要挪到 gb28181 下面。
+# 这里只放库自己消费的参数；「要不要验证」的开关在 gb28181.login.captcha-enabled。
+captcha:
+  # 加载 jar 内置的滑块/旋转模板（凹槽/拼图块 png）。
+  # 注意：这一项同时决定「模板前缀」，不要用 default-resource-prefix 去改背景图目录 ——
+  # 那个前缀对模板同样生效，改了会让模板被拼到 resource 目录下而报「无法读到指定的资源」。
+  # 背景图由 CaptchaResourceConfiguration 自己注入，不靠配置。
+  init-default-resource: true
+  # 预生成缓存：用户点登录时已有现成图，少等一次生成
+  local-cache-enabled: true
+  local-cache-size: 20
+  # 单张验证码有效期（毫秒）
+  expire:
+    default: 60000
+
+gb28181:
+  # ==================== 登录防护 ====================
+  # 三层：行为验证码 + 账号维度计数 + IP 维度计数，见 LoginGuardService。
+  login:
+    # 失败计数窗口（分钟）：超过窗口重新计数
+    fail-window-minutes: 15
+    # 账号失败几次后临时锁定
+    lock-after-failures: 10
+    # IP 失败几次后临时锁定。门槛更高：办公网常整层楼共用一个出口 IP
+    ip-lock-after-failures: 50
+    # 锁定时长（分钟）。时间制而非永久：攻击者能故意锁死管理员，但 30 分钟自解，
+    # 重启进程即可立即清空内存计数
+    lock-minutes: 30
+    # 是否校验验证码。默认 true，每次登录都要。
+    # 保留这个开关只有一个用途：验证码本身坏掉时（图片生成依赖库/字体/资源）
+    # 可以改 false 重启应急，不至于全员登不进去。平时不要关。
+    #
+    # 注意：机器调用（业务平台/脚本）**不需要**关这个 —— 用 API 密钥登录即可，
+    # 密钥由每个用户在「设置 → 账号安全」里自行生成，每把绑一个账号、可随时撤销。
+    captcha-enabled: true
+
+  # ==================== 接口文档（对外对接用） ====================
+  # /doc.html 是 Knife4j 中文界面；/v3/api-docs 是原始 OpenAPI JSON。
+  # 交付给业务平台时保持 true；纯内网生产可置 false 让文档端点彻底不注册。
+  api-docs:
+    enabled: true
+    # 默认为 true：接口清单会暴露全部路径与参数，裸奔等于给扫描器送地图。
+    # 开启后必须通过环境变量 GB_DOCS_PASSWORD 提供口令，否则启动直接失败。
+    protect: true
+    basic-username: gb28181
+    # 口令只从环境变量取（仓库里不放默认值）；protect=true 而这里为空时启动会直接失败
+    basic-password: ${GB_DOCS_PASSWORD:}
+  # 平台 20 位编码
+  platform-id: "34020000002000000001"
+  # SIP 信令监听
+  sip-host: "0.0.0.0"
+  sip-port: 5060
+  # SIP 信令传输协议，逗号分隔。GB/T 28181 允许设备用 UDP 或 TCP，由设备侧配置决定。
+  # 只监听 UDP 时，配成 TCP 的设备完全注册不上，且平台日志里一条记录都没有 ——
+  # 极易误判成网络不通或鉴权失败。故默认两种都监听（共用同一端口，互不冲突）。
+  # 防火墙需同时放行 udp 与 tcp 的 sip-port。
+  sip-transports: "UDP,TCP"
+  # SIP 对外通告地址（写入 INVITE 的 From / Contact）。留空自动推断本机非回环 IPv4。
+  # 接真实设备时若平台有多个网卡或经过 NAT，务必改成设备可达的本机 IP，
+  # 否则设备无法回包，表现为「点播无响应」。
+  sip-advertised-ip: "123.57.109.223"
+
+  # ==================== SIP 注册鉴权（平台密码） ====================
+  # 系统级统一密码：设置后设备 REGISTER 需通过 Digest 鉴权，密码错误返回 401。
+  # 留空 = 不鉴权（内网联调方便，公网部署务必设置）。
+  # 注意：鉴权只校验密码，不校验用户名（各厂商 username 填法不一，强制校验会误拦设备）。
+  sip-password: ""
+
+  # 媒体 IP：SDP c= 行与播放地址主机，必须是设备可达地址；留空自动探测本机 IP
+  media-ip: "123.57.109.223"
+  # WebRTC 对外通告地址（ZLM 的 rtc.externIP），也是浏览器 ICE 报文要打到的地址。
+  # 留空 = 回退上面的 media-ip，同机部署时两者本就相同，所以通常不用配。
+  #
+  # 【什么时候必须单独配】服务与浏览器不在同一个「可达域」时：
+  #   · 本机/局域网调试，而 media-ip 还留着线上那套公网 IP（本项目当前就是这种：
+  #     media-ip=123.57.109.223）。此时 answer 里的 candidate 是那个公网 IP，
+  #     浏览器把 STUN 打过去收不到回包 → 【协商成功但画面全黑】，ZLM 15 秒后
+  #     打「接受rtp/rtcp/datachannel超时」关掉 transport。FLV 走 HTTP 回源不受影响，
+  #     所以现象是「FLV 能播、WebRTC 不能」。
+  #
+  #     本机跑请加启动参数：--gb28181.rtc-extern-ip=auto
+  #       auto = 自动取「默认路由所在网卡」的 IPv4，不用手工查 IP
+  #              （装了 VMware/VirtualBox 的机器上 ipconfig 第一条往往是 192.168.80.1
+  #               这类虚拟网卡，局域网里别的机器到不了）。
+  #     要固定成某个 IP 就直接写，例如 --gb28181.rtc-extern-ip=192.168.20.138。
+  #
+  #     ⚠️ 本地三个启动脚本都已带这个参数，直接跑即可：
+  #        scripts\restart-local.ps1（默认 auto，可 -RtcExternIp 192.168.x.x 覆盖）
+  #        start-local.bat / start-platform.bat（固定 auto）
+  #     核对方法：启动日志里搜 `ZLM 配置 rtc.externIP=`，看是不是本机局域网 IP。
+  #   · WebRTC 走独立入口（例如单独的反代/端口映射），对外地址与 media-ip 不同。
+  #
+  # 【线上不要改】NAT 部署时这个值必须是对外公网地址，改成内网地址会让公网浏览器连不上。
+  #
+  # 【浏览器还必须能解这个编码】ZLM 不做转码，answer 里的编码就是流本身的编码：
+  #   流是 H264 → 所有浏览器都能播；
+  #   流是 H265 → 只有 Chrome ≥136（需硬件 HEVC 解码）与 Safari 能播，
+  #               Edge / Firefox / 国产浏览器会协商失败或黑屏。现场若混用浏览器，
+  #               应把设备编码改成 H264（本平台大华设备当前主/子码流都是 H265）。
+  # rtc-extern-ip: "192.168.1.100"
+  # 媒体服务端口（注意：Spring Boot 自己占用 8080，媒体 HTTP 改用 8081）
+  http-port: 8081
+  rtmp-port: 11935
+  rtsp-port: 18554
+  rtc-port: 18000
+  app: rtp
+  # RTP 收流模式
+  # false（默认）= 每通道独占一个端口（ZLM 自动分配，受内置端口池 [30000,35000] 限制）
+  # true          = 单端口收流：所有设备推到同一端口，ZLM 按 RTP 的 SSRC 分流
+  #                 优点：端口数不受限、防火墙只需放行一个端口
+  #                 代价：RTCP 失效（无丢包率）、RTP 超时不再触发 detach 回调、不能做 SSRC 过滤
+  rtp-single-port: true
+  # 单端口模式下的收流端口（UDP 与 TCP 被动共用）
+  rtp-single-port-number: 24560
+  # 「无人观看」自动关流延迟（毫秒）。点播后若一直没有播放器拉流，
+  # ZLM 到点就关流并向设备发 BYE。默认 45 秒：给前端留足首次加载播放器
+  # SDK（jessibuca.js + decoder.wasm 约 1.3MB）与 WASM 编译的时间
+  # （公网慢时 20 秒内可能还没建立拉流连接，流会被提前关掉→“点播很慢”）。
+  stream-none-reader-delay-ms: 45000
+  # 随流上下线自动录像
+  auto-record: false
+  record-root: ""
+
+  # 云端录像单文件最长时长（秒），到点由 ZLM 自动切分片。
+  #
+  # 这是「崩溃损失上限」，不是磁盘优化参数。ZLM 原生库存在未捕获的 C++ 异常
+  # （实测 RtmpMediaSourceMuxer::getOwnerPoller not implemented → terminate()
+  # → SIGABRT），整个进程会崩掉，正在写的分片来不及写 moov，留下大小正常但
+  # 无法播放的孤儿文件（moov atom not found，无法修复）。
+  #
+  # 因此这个值 = 一次崩溃最多丢多久录像：
+  #   3600（1 小时，ZLM 默认）→ 实测崩一次丢 55 分钟 / 319 MB
+  #   1800（30 分钟，当前值） → 最多丢 30 分钟，一天 24 个文件
+  #   300 （5 分钟）          → 最多丢 5 分钟，但一天 288 个文件（太碎）
+  #
+  # 取 1800：崩溃损失与文件数量折中。磁盘占用不变，列表按段展示。
+  # 原生库崩溃若被上游修复，可调回 3600 减少文件数。
+  record-max-second: 1800
+
+  # 是否由本进程提供 /record/** 录像文件。
+  # 默认 false，交给 nginx 的 location /record/（sendfile 直读）——
+  # Spring Boot 静态映射的 Range 请求只有 110KB/s，nginx 有 24MB/s，差 200 倍，
+  # 直接决定录像起播是「15 秒」还是「2 秒」。配置见 deploy/nginx-record.conf。
+  # 没有 nginx 的单机/内网部署可改为 true 回退到本进程提供（大文件拖动会变慢）。
+  record-static-enabled: false
+
+  # 平台运行时行为
+  starter:
+    # 启动时执行 db/schema.sql 建表（幂等：全部 CREATE TABLE IF NOT EXISTS）
+    init-schema: true
+    # 启动后自动点播第一台在线设备，便于快速验证「注册→INVITE→收流」
+    self-check: false
+    # 设备离线判定阈值（秒）：超过该时长未收到心跳即标记离线，应大于心跳周期 2~3 倍
+    device-offline-seconds: 180
+    # 离线巡检间隔（毫秒）
+    offline-scan-interval-ms: 60000
+    # 设备注册后自动下发查询采集数据（目录/信息/状态），落库到 gb_channel / gb_device
+    auto-collect: true
+    # 同一设备两次自动采集的最小间隔（秒），防止设备频繁重启把设备打爆
+    collect-interval-seconds: 300
+    # 是否采集设备信息（厂商/型号/固件）
+    collect-device-info: true
+    # 是否采集设备状态
+    collect-device-status: true
+    # 自动录像对账间隔（毫秒）：补归档丢失下线事件的录像（见 RecordService#reconcileAutoRecordings）
+    record-reconcile-interval-ms: 60000
+    # 对账首跑延迟（毫秒）：给启动过程中的流上下线事件留出到达时间
+    record-reconcile-initial-delay-ms: 30000
+
+    # ==================== 录像磁盘清理（必须配，否则磁盘会被写满） ====================
+    # 云端录像 24 小时不停写，单通道约 350MB/小时 ≈ 8GB/天。
+    # 没有清理时实测 30G 的盘只够 3 天，写满后 ZLM 分片写失败、
+    # PostgreSQL（同盘）也可能写失败，整个平台瘫痪。
+    #
+    # 两级策略：
+    #   1) 按天：删掉超过 record-retain-days 的非重要录像
+    #   2) 按水位：若仍超过 record-disk-max-used-percent，继续删最老的
+    #      （永远跳过 important=true 与最近 record-keep-min-days 天）
+    # 清理间隔（毫秒）
+    record-purge-interval-ms: 600000
+    # 首跑延迟（毫秒）：启动后先让对账/保活跑稳，再动删文件
+    record-purge-initial-delay-ms: 120000
+    # 录像保留天数；<=0 表示不按天删，只受磁盘水位约束
+    record-retain-days: 7
+    # 磁盘使用率上限（%）：超过就删最老的录像。不要设到 95，
+    # 必须给数据库/日志/转码临时文件留余量
+    record-disk-max-used-percent: 85
+    # 磁盘告急时也必须保留最近几天（防止配置失误把录像清空）
+    record-keep-min-days: 1
+
+    # 状态变更日志保留天数（gb_status_log）；<=0 表示不清理。
+    # 比操作日志（7 天）长：它是排查「某天设备为什么掉线」的关键证据。
+    status-log-retain-days: 30
+
+  # 对象存储（云端录像归档）。采用 S3 兼容协议，一套配置覆盖主流对象存储：
+  #   阿里云 OSS：endpoint=https://oss-cn-hangzhou.aliyuncs.com  region=cn-hangzhou  path-style=false
+  #   腾讯云 COS：endpoint=https://cos.ap-guangzhou.myqcloud.com  region=ap-guangzhou
+  #   MinIO：     endpoint=http://192.168.1.10:9000              path-style=true（必须）
+  #   七牛云 Kodo：endpoint=https://s3-cn-east-1.qiniucs.com      region=cn-east-1
+  #   AWS S3：    endpoint 留空自动推导                            region=us-east-1
+  # 不配置（enabled=false 或密钥为空）时，录像保存在本地磁盘 gb28181.record-root
+  oss:
+    enabled: false
+    endpoint: ""
+    region: "us-east-1"
+    access-key: ""
+    secret-key: ""
+    bucket: ""
+    # 对象键前缀（目录）：<prefix>/<通道编码>/<文件名>
+    prefix: "record"
+    # MinIO / Ceph 等自建存储必须设为 true
+    path-style: false
+    # 桶开启公共读时设为 true（直接拼永久外链）；否则生成签名 URL
+    public-read: false
+    # 签名 URL 有效期（秒）
+    sign-expire-seconds: 3600
+    # 上传成功后是否删除本地文件（false 保留本地副本便于回放兜底）
+    delete-local-after-upload: false
+    connect-timeout-ms: 10000
+    # 录像文件可能很大，读超时默认 5 分钟
+    read-timeout-ms: 300000
+
+# ==================== 跨域（前后端分离部署用） ====================
+# 默认关闭：前端产物打包进 jar，同源部署不需要 CORS。
+# 一旦默认放开（尤其 "*"），任何网站都能借用户浏览器带登录态调本平台接口。
+# 分离部署时显式列出前端地址，支持通配子域 https://*.example.com
+  # 跨域（前后端分离部署用）
+  cors:
+    allowed-origins: []
+    allow-credentials: true
+    max-age: 3600
+
+# ==================== 大华 NetSDK 直连 ====================
+# 与国标并列的第二条接入通道，不经 SIP、不用 MANSCDP、
+# 不需要平台 20 位编码。因此配置顶层命名空间是 dahua 而不是 gb28181.dahua。
+# 整段删掉平台仍能正常跑国标。
+# 需要 netsdk 已 install 到本地仓库，原生库已打进 sdk-dahua 的 jar，
+# 详见 sdk-dahua/docs/原生库打包.md
+dahua:
+  # 是否启用大华接入。
+  # 原生库缺失时本来就会自动降级，不需要靠这个开关兜底；
+  # 关掉它的场景是「确定不用大华，想彻底不碰 SDK」。
+  enabled: true
+  # 设备 RTSP 端口（大华默认 554）。
+  # 预览/回放走 RTSP 而不是 SDK 取码流：复用现有的 FLV/WS-FLV/HLS/WebRTC
+  # 输出与前端播放器，平台侧不用自己解 PS 流。代价是需要设备开启 RTSP。
+  rtsp-port: 554
+  # 单台设备的通道总数；0 = 用设备登录时上报的 byChanNum（推荐）。
+  # 大华的 RTSP 把子码流排在主码流之后（4 通道设备：主 1~4 / 子 5~8），
+  # 推算子码流通道号必须知道总数。只有设备不上报时才需手工指定。
+  channel-total: 0
+
+  # 设备主动注册（SERVER 模式）：适用于设备 IP 不固定（4G / 动态 IP / NAT 后）。
+  # 平台开监听端口，设备主动连上来，平台从回调里拿到实时地址。
+  # 与国标的注册机制完全不同：国标是设备发 SIP REGISTER，
+  # 这里是设备向平台 TCP 端口上报序列号、再由平台反向登录。
+  server-mode:
+    # 【默认关闭】它要占用一个端口，且必须在设备侧
+    # 「网络 → 主动注册」里配置指向本平台才有意义。
+    # 默认打开会让每次启动都多一个可能失败的点。
+    enabled: false
+    # 绑定地址；0.0.0.0 表示所有网卡（公网部署推荐）
+    bind-ip: "0.0.0.0"
+    # 监听端口，设备侧主动注册要填这个
+    port: 9500
+    # 注册记录失效阈值（秒）。设备断电时不会发「我走了」，只能靠超时判定。
+    # 大华注册心跳通常 30~60 秒，取 3 倍留出抖动余量。
+    # 太小 → 在线设备被误判离线（「明明在线却连不上」）；
+    # 太大 → 僵尸地址拖慢巡检（每次都要等满登录超时）。
+    expire-seconds: 180
+
+    # 注册即入库：注册上来的设备自动建成 gb_device 档案并拉一次通道目录。
+    # 关掉它意味着「注册只进内存注册表，设备表里看不到」——那不叫接入，
+    # 只有安全要求高、要人工审批白名单的现场才该关。
+    auto-provision: true
+
+    # 自动建档案用的设备账号。注册回调不带凭据，只能用这份默认值；
+    # 现场按设备分别授权时，入库后可在设备页单独改。
+    default-username: "admin"
+
+    # 自动建档案用的密码：【不要写在这里】，用环境变量 GB_DAHUA_PASSWORD 注入。
+    # 为空时自动接入会被跳过并打告警（不会静默失败）。
+    default-password: "${GB_DAHUA_PASSWORD:}"
+
+    # 设备 SDK 服务端口，用于「建档案」和后续直连操作。
+    # 注意它不是注册回调里那个源端口：源端口只在本次注册有效、下一分钟就变。
+    # 「把注册那条连接变成登录会话」平台已自动完成（注册回调后立刻用
+    # emSpecCap=2 + SN 登录），不需要在这里配什么。
+    sdk-port: 37777
+
+hikvision:
+  # 是否启用海康 ISUP 接入。
+  # 原生库缺失时自动降级（打 WARN 不中断启动），不需要靠这个开关兜底；
+  # 关掉它的场景是「确定不用海康，想彻底不碰 SDK」。
+  enabled: true
+
+  # ISUP 接入密钥，必须在设备侧「平台接入 → ISUP → 密钥」里填成一样。
+  # 【不要写在这里】，用环境变量 HIK_ISUP_KEY 注入。
+  # 为空时 SDK 仍能收到注册回调，但鉴权过不去，设备会反复重连。
+  isup-key: "${HIK_ISUP_KEY:}"
+
+  # 告诉设备的平台公网地址。设备用它回连取流（预览/回放/对讲）。
+  # 留空则回退 cms.bind-ip，再退 127.0.0.1。
+  # 设备与平台不在同一网段（NAT / 4G / 云服务器）时必须填公网 IP，
+  # 否则设备连不上，表现为「注册在线但一点播就超时」。
+  public-ip: "${HIK_PUBLIC_IP:}"
+
+  # 注册监听（CMS）：设备主动连上来上报序列号。
+  # 与国标 SIP REGISTER、大华 SERVER 模式是三种不同的机制。
+  cms:
+    bind-ip: "0.0.0.0"
+    # 设备侧「ISUP 服务器地址」要填这个端口
+    port: 7660
+    # 0 = TCP，1 = UDP。设备侧要选同一种。
+    link-mode: 0
+
+  # 取流监听（SMS）：设备把 PS 流推到这里的端口。
+  # 【必须与 cms.port 不同】：CMS 与 SMS 是两个独立的监听器，
+  # 绑同一端口时后启动的那个必然失败（错误码 72 = 端口占用），
+  # 表现为「注册在线但一点播就超时」。
+  # 官方 SDK demo 的分配是 CMS=7660 / SMS=7665（见 config.properties
+  # 的 CmsServerPort 与 SmsServerListenPort），照此设置。
+  stream:
+    port: 7665
+
+  # 回放监听：设备按时间推历史码流。
+  # 与预览是两个独立的监听器（NET_ESTREAM_StartListenPlayBack /
+  # StartListenPreview），不能共用端口，否则第二个启动时报错误码 72。
+  playback:
+    port: 7666
+
+  # 报警监听（Alarm）。
+  # reuse-cms-port=true 表示复用 CMS 端口，省一个端口；
+  # 但部分固件在复用模式下报警会丢，排查不通时改成 false 单独开端口。
+  alarm:
+    bind-ip: "0.0.0.0"
+    port: 7663
+    reuse-cms-port: false
+    # 0 = 结构化报警（EHOME_ALARM），1 = ISAPI 报警（EHOME_ISAPI_ALARM）。
+    # 智能事件（绊线/区域入侵/逆行…）只走 ISAPI，所以填 1 才能收到全量；
+    # 填 0 只有设备状态、视频丢失这类基础报警。
+    protocol-type: 1
+
+  # 抓图直传（SS）：设备主动把 JPEG 推到平台，平台不解码、不拉流。
+  # 相比「平台发 ISAPI 抓图」，省一次反向连接和一次码流传输。
+  picture:
+    enabled: false
+    bind-ip: "0.0.0.0"
+    port: 7664
+    # 4 = 平台接收设备主动上传的图片
+    server-type: 4
+
+  # 注册记录失效阈值（秒）。设备断电不会发「我走了」，只能靠超时判定。
+  # 海康注册心跳通常 30~60 秒，取 1.5 倍留抖动余量。
+  register-expire-seconds: 90
+
+  # 云台单条命令的超时（毫秒）。ISAPI 是同步 HTTP，超时太短会把
+  # 慢设备误判成失败。
+  ptz-timeout-ms: 3000
+
+# 接口文档里展示的版本号：由 maven 资源过滤注入（spring-boot-starter-parent 用 @ 作定界符），
+# 这样 pom 改版本时文档自动跟着变，不需要手改常量。
+info:
+  app:
+    version: '@project.version@'

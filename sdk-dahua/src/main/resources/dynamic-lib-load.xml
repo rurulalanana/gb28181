@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  大华动态库清单（裁剪版，本项目维护，非大华原始文件）。
+
+  【为什么必须自己提供】
+  LibraryLoad.getLoadLibrary() 从 classpath 根读取本文件，用它决定两件事：
+    1) 要提取哪些库（getLibsSystem 遍历清单逐个解压）
+    2) 库名如何解析（compareLibName 以清单为白名单，不在清单里的名字解析成空串）
+
+  官方 netsdk jar 里也带了一份，但只列了 linux64 —— 在 Windows 上会让
+  win64 的库名全部解析成空串，最终拼出 "lib.so" 并报
+  `Unable to load library '...\lib.so'`。
+
+  本模块的 target/classes 在 classpath 上优先于依赖 jar，因此这份清单会覆盖
+  官方 jar 里的那一份。这也是必须把它放在 src/main/resources/ 根目录的原因。
+
+  【清单必须与 lib/<platform>/ 严格一致】
+  LibraryLoad 把「按清单逐个提取」整段放在同一个 try 里，任意一个库缺失就
+  抛异常并中断循环，后面的库（包括 dhnetsdk）一个都不会被提取。
+
+  【linux64：6 个，142.2 MB】
+    dhnetsdk         50.45 MB  登录/目录/PTZ/抓图/预览/回放
+    dhconfigsdk      31.12 MB  被 NetSDKLib 静态块强制加载（与 dhnetsdk 同块），缺它整个类初始化失败
+    StreamConvertor  27.95 MB  ★ 码流格式转换。libdhnetsdk.so 用 dlopen 加载，
+                               缺了它 CLIENT_RealPlayByDataType 的 emDataType
+                               静默失效，只能拿到私有 DHAV —— 见 docs/原生库打包.md §2.1
+    avnetsdk         29.47 MB  语音对讲（CLIENT_StartTalkEx 的音频编解码）
+    crypto            2.71 MB  TLS（HTTPS 登录、国密）
+    ssl               0.48 MB
+
+  【win64：5 个，45.1 MB】
+    dhnetsdk     32.53 MB
+    dhconfigsdk   8.27 MB
+    libeay32      1.89 MB  ← Windows 侧的 crypto 对应物
+    ssleay32      0.43 MB  ← Windows 侧的 ssl 对应物
+    Infra         1.99 MB  ← dhnetsdk.dll 的依赖
+
+  【刻意不包含（两个平台一致）】
+    play / RenderEngine  依赖 libX11/libGL/libEGL/libasound，服务器无图形环境
+    ImageAlg        NetSDKLib 里那行是注释掉的
+    IvsDrawer       仅智能分析绘图
+
+  【⚠️ 裁剪判据不能用「Java API 有没有引用」】
+  StreamConvertor / avnetsdk 都属于「原生库 dlopen 加载」：Java 侧一个符号都不引用，
+  但 libdhnetsdk.so 里明写着这两个 .so 的文件名。按 Java 引用面裁剪会静默砍掉
+  运行时行为 —— 转封装失效不会报错，只会退化成私有流。
+  判据应该是：strings libdhnetsdk.so | grep '\.so'，逐个确认删掉的库不在里面。
+
+  Windows 侧没有独立的 StreamConvertor.dll（转封装内置在 dhnetsdk.dll 内），
+  所以这个坑只在 Linux 上暴露 —— 也就是「本地一切正常、部署就不行」。
+
+  【只列当前平台目录】
+  未列出的平台节点会让 getLibsSystem 返回空列表 —— 该平台下不提取任何库，
+  报错信息变成「找不到 libdhnetsdk.so」而不是更难懂的「lib.so」。
+-->
+<dynamic-lib>
+    <linux64>
+        <lib>dhnetsdk</lib>
+        <lib>dhconfigsdk</lib>
+        <lib>StreamConvertor</lib>
+        <lib>avnetsdk</lib>
+        <lib>crypto</lib>
+        <lib>ssl</lib>
+    </linux64>
+    <win64>
+        <lib>dhnetsdk</lib>
+        <lib>dhconfigsdk</lib>
+        <lib>libeay32</lib>
+        <lib>ssleay32</lib>
+        <lib>Infra</lib>
+    </win64>
+</dynamic-lib>

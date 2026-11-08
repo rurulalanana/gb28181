@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.netsdk</groupId>
+  <artifactId>netsdk</artifactId>
+  <version>3.061</version>
+  <packaging>jar</packaging>
+
+  <name>netsdk</name>
+  <description>
+    大华 NetSDK 的 Java 部分（General_NetSDK JAVA，V3.061）。
+
+    这不是一个真正发布到 Maven 中央仓库的构件。它随 sdk-dahua 仓库携带，
+    以 file:// 本地仓库的形式提供，目的是让「clone 后即可构建」成立。
+
+    只包含 Java class（com.netsdk.lib.* 等），不含任何原生库 ——
+    .so / .dll 由 sdk-dahua 的 lib/&lt;platform&gt;/ 提供，并按 profile 打进 jar。
+
+    版权归浙江大华技术股份有限公司所有，仅限在已获授权的设备接入场景使用。
+  </description>
+</project>

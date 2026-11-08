@@ -1,0 +1,356 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.rurulalanana</groupId>
+    <artifactId>gb28181</artifactId>
+    <version>1.0.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>gb28181-platform-starter</artifactId>
+  <version>1.0.2</version>
+  <name>gb28181-platform-starter</name>
+  <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
+
+  <!--
+    Spring Boot 版本在这里声明，下面的 dependencyManagement 会 import 它的 BOM。
+
+    【为什么不再继承 spring-boot-starter-parent】
+    Java 只允许一个 <parent>，而本项目已经用 io.github.rurulalanana:gb28181
+    做父工程（由它统一各内部模块的依赖版本）。两者不可兼得。
+
+    去掉 starter-parent 后算等价替代：
+      ① 依赖版本  → import spring-boot-dependencies BOM（下面 dependencyManagement）
+      ② -parameters 编译参数 → build 里 maven-compiler-plugin 显式开启
+         （Spring MVC 靠它从字节码读参数名；不开会让 @RequestParam 省略 value 时
+           启动报「Name for argument of type ... not specified」）
+      ③ spring-boot-maven-plugin 的 repackage 绑定 → build 里显式写 execution
+         （starter-parent 是在 pluginManagement 里绑的，不继承就没人绑）
+      ④ 插件版本 → 由本 pom 与本项目 parent 的 pluginManagement 分别声明
+  -->
+  <!--
+    随 sdk-dahua 模块携带的本地 Maven 仓库，用于 com.netsdk:netsdk。
+
+    【为什么本模块也要声明】<repositories> 只沿 parent 继承，不沿聚合传递。
+    本模块的 parent 是 io.github.rurulalanana:gb28181（根 pom），
+    而 netsdk 的仓库声明在 sdk-dahua 自己的 pom 里 —— 兄弟模块之间不继承，
+    所以这里必须再声明一次。合并成单仓库后路径是 ../sdk-dahua，
+    比原先「四个仓库并列」的布局更稳（不再依赖同级目录名不变）。
+
+    不声明会怎样：本地仓库里已经有 netsdk 了，但 Maven 通过 _remote.repositories
+    记着「这个构件来自 sdk-dahua-bundled」；本模块的仓库列表里没有它，
+    于是判定为「不可用」，报
+      Cannot access aliyun in offline mode and the artifact
+      com.netsdk:netsdk:jar:3.061 has not been downloaded from it before
+  -->
+
+  <properties>
+    <!-- Spring Boot 版本：下面的 dependencyManagement import 它的 BOM -->
+    <spring-boot.version>3.2.5</spring-boot.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <sip.module.version>1.0.14</sip.module.version>
+    <zlm.module.version>1.0.11</zlm.module.version>
+    <!-- 设备接入契约（厂商无关）。sdk-dahua / sdk-hikvision 都实现它。 -->
+    <deviceaccess.version>1.0.0</deviceaccess.version>
+    <!-- 大华设备接入（NetSDK 实现）。
+         命名约定 sdk-<厂商>：海康是平级的 sdk-hikvision。 -->
+    <sdk-dahua.module.version>1.0.0</sdk-dahua.module.version>
+    <sdk-hikvision.module.version>1.0.0</sdk-hikvision.module.version>
+    <!-- 大华 NetSDK 的 Java 部分，需先 install 到本地仓库（不在中央仓库）。
+         版本必须与 sdk-dahua 里的一致，否则运行时会缺类。 -->
+    <netsdk.version>3.061</netsdk.version>
+    <mybatis-plus.version>3.5.11</mybatis-plus.version>
+    <aws.sdk.version>2.28.11</aws.sdk.version>
+    <!-- 与 Spring Boot 3.2 匹配的 springdoc 版本，Knife4j 的传递依赖被排除后以这里为准 -->
+    <springdoc.version>2.6.0</springdoc.version>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>sdk-dahua-bundled</id>
+      <name>sdk-dahua 随仓库携带的本地构件</name>
+      <url>file:///${project.basedir}/../sdk-dahua/lib/netsdk-repo</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
+  </repositories>
+
+
+  <dependencyManagement>
+    <dependencies>
+      <!--
+        Spring Boot 依赖版本管理。
+        原先由 spring-boot-starter-parent 提供；现在父工程是
+        io.github.rurulalanana:gb28181（Java 只允许一个 parent），
+        改用 BOM import 拿到同样的版本管理：
+        spring-boot-* / jackson / tomcat / logback / lombok 等版本全部由它决定。
+      -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- WebSocket：只用于大华双工对讲的音频下行（/api/v1/dahua/talk/audio）。
+         为什么不用 SSE / 分块 HTTP：下行是 8 kHz/16 bit 裸 PCM 的连续二进制流，
+         声明成 text/event-stream 要 base64（体积 +33%、编码开销），
+         而 WebSocket 原生就是二进制帧，浏览器侧 AudioBuffer 直接吃 ArrayBuffer。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+
+    <!-- GB28181 信令模块。
+         注意：jain-sip 1.2.344 硬依赖 log4j 1.x 的 API（org.apache.log4j.Priority / Layout），
+         log4j-over-slf4j 不提供 Layout，缺失会直接抛 PeerUnavailableException，
+         因此这里不能排除 log4j；其日志输出由 log4j.properties 单独收敛（应用日志仍走 Logback）。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>gb28181-sip</artifactId>
+      <version>${sip.module.version}</version>
+    </dependency>
+
+    <!-- 设备接入契约（接口）。单独一个模块，不随厂商走：
+         平台代码只引它，不直接依赖某一家厂商的实现。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>device-access</artifactId>
+      <version>${deviceaccess.version}</version>
+    </dependency>
+
+    <!-- 大华接入：契约 + 厂商实现（dahua 包）。
+         平台只用 deviceaccess 包的接口，不直接引用 dahua 包的类；
+         netsdk / jna 在该模块里是 provided，不会传递到这里 ——
+         因此没装 SDK 的机器也能正常编译与运行国标链路。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>sdk-dahua</artifactId>
+      <version>${sdk-dahua.module.version}</version>
+    </dependency>
+
+    <!-- 海康 ISUP 接入。原生库（libHCISUP*.so / .dll）按平台打进该 jar，
+         与大华同一套做法：本地开发 win64、部署 linux64。
+         缺库时 DahuaConfiguration / HikvisionConfiguration 都会降级启动，
+         不影响国标链路。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>sdk-hikvision</artifactId>
+      <version>${sdk-hikvision.module.version}</version>
+    </dependency>
+
+    <!--
+      大华 NetSDK 的 Java 部分（class 文件）。
+
+      为什么必须在这里显式声明：sdk-dahua 模块里 netsdk 是 provided，
+      不传递；但大华 provider 在运行时会直接调用 com.netsdk.lib.*，
+      缺了会在第一次用大华设备时抛 NoClassDefFoundError。
+
+      用 compile 而不是 provided：本平台交付形态是单 jar 部署
+      （前端产物都打进 jar 了），运维不应再手工摆 classpath。
+
+      **原生库不在这里** —— 它们由 sdk-dahua 的 jar 按 profile 携带
+      （linux64/*.so 或 win64/*.dll），见 sdk-dahua/docs/原生库打包.md。
+      本依赖只提供 4.7 MB 的 class，不含任何 .so/.dll。
+
+      获取方式（不在中央仓库）：见 docs/大华SDK接入.md §8。
+      未安装时构建会失败 —— 需要大华功能就必须先装；
+      不需要时把本依赖与 sdk-dahua 依赖一起注释掉即可。
+    -->
+    <dependency>
+      <groupId>com.netsdk</groupId>
+      <artifactId>netsdk</artifactId>
+      <version>${netsdk.version}</version>
+    </dependency>
+
+    <!-- 流媒体服务模块（内嵌 ZLMediaKit，自带各平台原生库） -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>gb28181-sip-zlm</artifactId>
+      <version>${zlm.module.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <!-- PostgreSQL -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.3</version>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+
+    <!-- MyBatis-Plus（Spring Boot 3 专用 starter） -->
+    <dependency>
+      <groupId>com.baomidou</groupId>
+      <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+      <version>${mybatis-plus.version}</version>
+    </dependency>
+
+    <!-- 3.5.9+ 起分页/防全表更新等插件被拆到 jsqlparser 模块，需显式引入 -->
+    <dependency>
+      <groupId>com.baomidou</groupId>
+      <artifactId>mybatis-plus-jsqlparser</artifactId>
+      <version>${mybatis-plus.version}</version>
+    </dependency>
+
+    <!-- Sa-Token 鉴权 -->
+    <dependency>
+      <groupId>cn.dev33</groupId>
+      <artifactId>sa-token-spring-boot3-starter</artifactId>
+      <version>1.44.0</version>
+    </dependency>
+
+    <!-- 密码校验（BCrypt） -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-crypto</artifactId>
+    </dependency>
+
+    <!-- 对象存储（S3 兼容协议）：一套 SDK 覆盖阿里云 OSS / 腾讯云 COS / MinIO /
+         七牛云 Kodo / AWS S3 / Ceph RGW 等主流对象存储。
+         仅引入 s3 与 apache-client（同步 HTTP 客户端），不引入整个 AWS SDK。 -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>${aws.sdk.version}</version>
+    </dependency>
+
+    <!-- 二维码不再由后端生成：分享页用 qrcode 库在浏览器本地画。
+         原先引 zxing core（595KB）只为出一个 PNG，而分享页本身是懒加载路由，
+         前端引库不会撑大主包 —— 反而省掉一个免登录的图片编码端点。
+         详见 {@code LiveShareView.vue} 里 {@code buildQr()} 的注释。 -->
+    <!-- 行为验证码（滑块/旋转/点选），用于登录接口防爆破。
+         选 tianai-captcha 而不是 anji-plus/captcha：后者 2024 年后已基本停更，
+         而 tianai 是 dromara 社区在维护的项目（1.5.6，近两周仍有提交）。
+         starter 同时带 spring.factories 与 Boot 3 的 AutoConfiguration.imports，
+         且不引用 javax.servlet，可直接在 Boot 3 下使用。 -->
+    <dependency>
+      <groupId>cloud.tianai.captcha</groupId>
+      <artifactId>tianai-captcha-springboot-starter</artifactId>
+      <version>1.5.6</version>
+    </dependency>
+
+    <!-- ==================== 接口文档（OpenAPI 3 + Knife4j UI） ====================
+         业务平台要按接口对接，所以接口清单必须是「能试调」的活文档，而不是 md 手抄。
+
+         <p><b>为什么锁 springdoc 2.6.0</b>：Knife4j 4.5.0 自带 springdoc 2.2.0，
+         那个版本与 Spring Boot 3.2 的 {@code ControllerAdviceBean} 构造函数不兼容，
+         启动即报 {@code NoSuchMethodError}。所以下面 exclude 掉传递依赖，
+         版本统一由这里决定（2.6.0 是 Boot 3.2 的匹配版本）。
+
+         <p><b>为什么留 knife4j</b>：springdoc 自带的 Swagger UI 只有英文、
+         分组切换与离线导出都弱；Knife4j 的中文界面、调试参数持久化、
+         导出 Markdown/OpenAPI 对交付给第三方更实用。两者共用同一份
+         {@code /v3/api-docs}，不会重复建模。 -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>${springdoc.version}</version>
+    </dependency>
+    <!--
+      只引 Knife4j 的<b>静态 UI</b>（/doc.html），不引它的 starter。
+
+      原因：knife4j-openapi3-jakarta-spring-boot-starter 4.5.0 是按 springdoc 2.2
+      编译的，它调用 {@code SpringDocConfigProperties#getGroupConfigs()} 时按
+      返回 {@code List} 的旧签名生成字节码；而 Boot 3.2 必须用 springdoc 2.6，
+      该方法返回 {@code Set} —— 运行期直接 NoSuchMethodError，
+      表现是「/doc.html 打得开，但 /v3/api-docs 返回 500」。
+
+      Knife4j 的界面本质上是一个消费标准 {@code /v3/api-docs} 的前端，
+      不需要 starter 也能工作：静态资源（去掉 starter）由这个包提供，
+      文档保护改用 {@code ApiDocsProtectionFilter} 自己实现。
+    -->
+    <dependency>
+      <groupId>com.github.xiaoymin</groupId>
+      <artifactId>knife4j-openapi3-ui</artifactId>
+      <version>4.5.0</version>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.2.0</version>
+        <configuration>
+          <classpathScope>test</classpathScope>
+        </configuration>
+      </plugin>
+
+      <!--
+        【必须显式开 -parameters】
+        原先由 spring-boot-starter-parent 的 pluginManagement 提供。
+        不开的后果：@RequestParam / @PathVariable 省略 value 时，
+        Spring 6 需要在字节码里读参数名，读不到就在启动时报
+        「Name for argument of type [java.lang.String] not specified」。
+        本项目的 Controller 大量省略 value（靠参数名推断），所以不能漏。
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <release>${java.version}</release>
+          <parameters>true</parameters>
+          <encoding>${project.build.sourceEncoding}</encoding>
+        </configuration>
+      </plugin>
+
+      <!--
+        【必须显式声明 repackage】
+        starter-parent 在 pluginManagement 里把 spring-boot-maven-plugin 的
+        repackage goal 绑到了 package 阶段；不继承它就得自己绑，
+        否则 mvn package 产出的是普通 jar（无 BOOT-INF/classes），
+        无法用 java -jar 启动。
+      -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <version>${spring-boot.version}</version>
+        <configuration>
+          <mainClass>io.github.rurulalanana.starter.Gb28181PlatformApplication</mainClass>
+        </configuration>
+        <executions>
+          <execution>
+            <id>repackage</id>
+            <goals>
+              <goal>repackage</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

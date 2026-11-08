@@ -1,0 +1,495 @@
+# 大华 NetSDK 接入评估与验证记录
+
+> 本文所有数字与结论均来自**实测**，不是文档推测。
+> 验证环境：`160.202.254.65` / CentOS Stream 8 / glibc 2.28 / Temurin JDK 21.0.6 / x86_64。
+
+## 1. SDK 获取与存放
+
+> **2026-10 起 SDK 已迁到 `sdk-dahua` 仓库**，本仓库不再存放。
+> 原生库的裁剪、打包与平台切换见
+> `sdk-dahua/docs/原生库打包.md`。
+> 本文只保留评估结论与平台侧的接入说明。
+
+两个压缩包（用户提供）：
+
+| 文件 | 大小 |
+|---|---|
+| `General_NetSDK_ChnEng_JAVA_Linux64_IS_V3.061.0000001.0.R.260826.zip` | 76.09 MB |
+| `General_NetSDK_ChnEng_JAVA_Win64_IS_V3.061.0000001.0.R.260826.zip` | 270.36 MB |
+
+**存放位置：`sdk-dahua/sdk/dahua/`，已在 `.gitignore` 中忽略。**
+
+> ⚠️ 本仓库是**公开仓库**。大华 NetSDK 的二进制与源码受厂商许可约束，
+> 不得随公开仓库分发，因此 `sdk/` 永不入库，也不要打进公开的 Release 包。
+> 新克隆的仓库需要单独获取 SDK 后才能构建大华模块。
+
+## 2. SDK 的实际形态（与直觉不符的三点）
+
+1. **不是 jar，是源码。** 只提供 `.java` + `.so` + 一个 `pom.xml`，
+   需要自行编译出 `netsdk` 工件。
+2. **是 JNA，不是 JNI。** `NetSDKLib` 是 JNA 接口，依赖 `net.java.dev.jna:jna:5.13.0`。
+3. **`netsdk/lib` 依赖 `netsdk/demo`。** `ToolKits.java` 里 `import com.netsdk.demo.module.LoginModule`，
+   所以不能只编译 `lib` 包，必须连 demo 一起编译。（只影响编译期，运行时不用 demo。）
+
+包结构（`src/main/java/com/netsdk/`）：
+
+| 包 | 文件数 | 说明 |
+|---|---|---|
+| `lib` | 3966 | 核心：`NetSDKLib.java`(2.8 MB) + 3127 个 structure + 812 个 enumeration |
+| `common` | 9 | 工具 |
+| `demo` | 25 | GUI 演示（编译期被 lib 引用，不能删） |
+
+源码合计 7.8 MB，编译后 class 6059 个，**打成的 jar 仅 4.73 MB**。
+
+## 3. 原生库裁剪（关键收益）
+
+原始 `libs/linux64/` 共 9 个库、**186.5 MB**。逐个解析 ELF 依赖后：
+
+| 库 | 大小 | 是否需要 |
+|---|---|---|
+| `libdhnetsdk.so` | 50.45 MB | ✅ 核心 |
+| `libdhconfigsdk.so` | 31.12 MB | ✅ **硬性依赖**（见 §4） |
+| `libcrypto.so` | 2.71 MB | ✅ TLS/国密 |
+| `libssl.so` | 0.48 MB | ✅ 同上 |
+| `libavnetsdk.so` | 29.47 MB | ❌ 仅语音对讲 |
+| `libStreamConvertor.so` | 27.95 MB | ❌ Java API 零引用（已 grep 确认） |
+| `libImageAlg.so` | 0.06 MB | ❌ `NetSDKLib` 里那行是注释掉的 |
+| `libplay.so` | 39.76 MB | ❌ **必须排除**：依赖 `libX11/libGL/libEGL/libasound`，服务器无图形环境 |
+| `libRenderEngine.so` | 4.46 MB | ❌ 同上 |
+
+**裁剪后：4 个库，84.8 MB（省下 101.7 MB，54%）。**
+
+### 3.1 兼容性实测
+
+| 项 | 库要求 | 服务器 | 结论 |
+|---|---|---|---|
+| GLIBC | 最高 `2.7`（`libRenderEngine` 需 2.14） | 2.28 | ✅ |
+| GLIBCXX | `libdhnetsdk` 需 `3.4.9` | 3.4.25 | ✅ |
+| 架构 | x86-64 | x86_64 | ✅ |
+
+`ldd linux64/libdhnetsdk.so` 全部解析成功，无 `not found`。
+
+## 4. 两个必须知道的坑
+
+### 4.1 `dynamic-lib-load.xml` 是白名单，缺库会**静默失败**
+
+`LibraryLoad.getLoadLibrary()` 会遍历 `dynamic-lib-load.xml` 里当前平台的
+全部库逐个提取，**整段在一个 try 里**。原始清单 linux64 下第一项是
+`avnetsdk`，如果只带 `dhnetsdk`，第一个库就抛 `FileNotFoundException`
+中断循环 → 后面的库一个都不提取 → JNA 拿到不存在的路径。
+
+更隐蔽的是：`getLibraryName()` 用 `DynamicParseUtil.compareLibName()` 以清单
+做白名单，**不在清单里的名字会被解析成空串**，最终拼出 `lib.so`。
+
+因此清单必须与随包携带的库**严格对应**。本项目维护了一份裁剪版清单，
+放在 `sdk/dahua/build/dynamic-lib-load.xml`（构建时打进 jar 根目录）。
+
+### 4.2 `dhconfigsdk` 不可省略
+
+`NetSDKLib` 的两个静态字段在同一个静态块初始化：
+
+```java
+NetSDKLib NETSDK_INSTANCE = Native.load(LibraryLoad.getLoadLibrary("dhnetsdk"), NetSDKLib.class);
+NetSDKLib CONFIG_INSTANCE = Native.load(LibraryLoad.getLoadLibrary("dhconfigsdk"), NetSDKLib.class);
+```
+
+缺 `dhconfigsdk` 时不会「只用部分功能」，而是**整个 `NetSDKLib` 类初始化失败**，
+报 `Unable to load library '.../lib.so'`。
+
+### 4.3 提取逻辑可以绕过
+
+`LibraryLoad` 的做法是把 jar 内 `linux64/*.so` 提取到 `EXTRACT_PATH`
+（默认 `java.io.tmpdir`），再交给 JNA。
+
+**不必按它的方式做**：`getLoadLibrary` 最终返回的是
+`EXTRACT_PATH/<libName>` 这个**路径字符串**，JNA 只认这个路径。
+只要该路径下有可用的库文件，加载就成功 —— 所以把库放在
+`extract/` 下（或做符号链接）即可，**避免每次启动复制 84 MB**。
+
+## 5. 已验证的能力
+
+```
+java.version  = 21.0.6
+os.arch       = amd64
+load library: /opt/gb28181/dahua-sdk/extract/libdhnetsdk.so
+load library: /opt/gb28181/dahua-sdk/extract/libdhconfigsdk.so
+SDK version   = 2283f4a (2.40.63)
+CLIENT_Init   = true
+RESULT        = OK（原生库加载与初始化成功）
+```
+
+## 6. 需求清单与库的对应关系
+
+| 需求 | 需要 NetSDK？ | 依赖库 | 备注 |
+|---|---|---|---|
+| 周边设备发现 | 是 | dhnetsdk | `CLIENT_StartFind`/`CLIENT_DoFind` |
+| 设备主动注册 | 部分 | dhnetsdk | 若设备支持 GB28181，现有 SIP 链路即可 |
+| 通道获取 | 否 | — | GB28181 Catalog 已覆盖 |
+| 预览 | 否（推荐 RTSP） | dhnetsdk | 两套方案都可行，见 §7 |
+| 录像回放 | 否（推荐 RTSP） | dhnetsdk | 同上 |
+| 录像下载 | 否（推荐 RTSP） | dhnetsdk | 同上 |
+| 云台：基础方向/变倍 | 否 | — | GB28181 `PTZCmd` |
+| 云台：预置位 | 否 | — | GB28181，已实测可查 5 个 |
+| 云台：巡航组/巡迹/限位/定时任务/重启 | 是 | dhnetsdk/dhconfigsdk | 协议里没有 |
+| 抓图（设备直传） | 是 | dhnetsdk | 现有实现走 ffmpeg，而服务器未安装 |
+| 语音对讲（单工/双工） | 是 | dhnetsdk + **avnetsdk** | 需加回 29.47 MB |
+| 相机图像参数（亮度/对比度/…) | 是 | dhconfigsdk | 已在最小集合内 |
+| 报警接收 | 否 | — | GB28181 已接通 |
+
+## 7. 预览/回放建议走 RTSP，而不是 NetSDK
+
+已确认 `zlm4j` 暴露了 `mk_proxy_player_create` / `mk_proxy_player_play`，
+可以让嵌入式 ZLM 直接拉一路 RTSP：
+
+```
+rtsp://<user>:<pass>@<ip>:554/cam/realmonitor?channel=<N>&subtype=0
+```
+
+好处：零 NetSDK 依赖、零 JNI、复用现有 FLV/WS-FLV/HLS 输出与播放器，
+也不需要 `libStreamConvertor.so`（PS 解封装由 ZLM 做）。
+
+> 注：嵌入式 ZLM 的 HTTP API（`/index/api/*`）是**关闭**的（实测全部 404），
+> 所以必须走 zlm4j 的 JNA 接口，不能走 HTTP。
+
+## 8. 复现步骤
+
+本机已完成的准备（换机器 / 重装系统时需要重做）：
+
+```powershell
+# netsdk 已装进本地仓库：D:\maven\repository\com\netsdk\netsdk\3.061\
+# 重新安装：
+& 'D:\maven\apache-maven-3.6.3\bin\mvn.cmd' install:install-file `
+    -Dfile=netsdk-api.jar -DgroupId=com.netsdk -DartifactId=netsdk -Dversion=3.061
+```
+
+从零开始的完整流程：
+
+```
+# 1) 解包（Linux 版即可，Windows 版仅用于本地调试）
+cd sdk/dahua && unzip General_NetSDK_ChnEng_JAVA_Linux64_*.zip -d linux64/
+
+# 2) 编译 netsdk（必须连 demo 一起，否则 ToolLibs 报错）
+javac -encoding UTF-8 -cp jna-5.13.0.jar -d build/classes \
+      $(find <SDK_ROOT>/src/main/java/com/netsdk -name '*.java')
+
+# 3) 打 jar：class + properties + 裁剪版 dynamic-lib-load.xml
+jar cf netsdk-api.jar -C build/jarroot .
+
+# 4) 部署原生库
+mkdir -p /opt/gb28181/dahua-sdk/{linux64,extract}
+cp <SDK_ROOT>/libs/linux64/{libdhnetsdk,libdhconfigsdk,libcrypto,libssl}.so linux64/
+for f in linux64/*.so; do ln -sf "$PWD/$f" "extract/$(basename $f)"; done
+
+# 5) 运行前指定 extract 路径（或在代码里调 LibraryLoad.setExtractPath）
+java -cp netsdk-api.jar:jna.jar ... -Dxxx
+```
+
+## 9. 已落地的代码结构
+
+模块 `sdk-dahua`（v1.0.0，独立仓库），只暴露**接口**，不暴露大华类型：
+
+```
+io.github.rurulalanana.deviceaccess     ← 契约（实现无关，接海康/宇视也用它）
+├── DeviceKind               接入类型枚举：GB28181("gb28181") / DAHUA("dahua")
+├── ConnectMode              CLIENT 平台连设备 / SERVER 设备注册到平台
+├── DeviceContext            连接上下文（deviceId, host, port, user, pass, mode, serial）
+├── DeviceAccessProvider     probe / listChannels / liveStreamUri / playbackStreamUri / ptz
+├── DeviceRegisterTable      注册表抽象
+└── RegisterListener         监听器抽象
+
+io.github.rurulalanana.dahua            ← 大华实现
+├── DahuaDeviceAccessProvider  ★ 契约实现（探测/目录/流地址/云台）
+├── DahuaRegisterTable       内存表，默认 180s 过期，地址变更打日志
+├── DahuaRegisterListener    CLIENT_ListenServer，处理自动注册/序列号/IP 通知/断开
+└── internal/                不含业务判断的内部件
+    ├── DahuaSdk             SDK 生命周期 + 登录会话（SN / host:port 双索引）
+    ├── DahuaNativeLibrary   原生库平台探测与可操作的中文报错
+    └── DahuaPtzCommand      方向词 → SDK 指令码（纯逻辑，可单测）
+```
+
+**关键设计：平台不依赖大华**
+
+`netsdk` 与 `jna` 在 `sdk-dahua` 里是 **`provided`**，不会传递到 starter。
+`DeviceAccessRegistry` 用 `ObjectProvider` **延迟解析** provider ——
+因为大华 provider 的静态初始化会加载 `libdhnetsdk.so`，如果构造期注入
+`List<DeviceAccessProvider>`，**SDK 没装好会让整个平台起不来**，国标链路一起废掉。
+
+现在的行为：SDK 缺失 → 只有大华设备不可用，国标完全正常。
+
+> **例外：`netsdk` 的 class 由 starter 自己声明 `compile` 依赖**。
+> 原生库在 dahua 的 jar 里按 profile 携带，但 Java class 不在 ——
+> dahua 里是 `provided` 不传递，而 provider 运行时要调 `com.netsdk.lib.*`。
+> 因此 starter 显式声明一份 `com.netsdk:netsdk`，让 fat jar 自包含、单 jar 可部署。
+> 两份分工见 `sdk-dahua/docs/原生库打包.md` §5。
+
+### 9.1 平台侧新增的两个端点
+
+| 端点 | 参数 | 作用 |
+|---|---|---|
+| `POST /api/v1/device/adddahua` | `serial` `host` `port=37777` `username` `password` `name` | 纳管一台 SDK 直连设备 |
+| `POST /api/v1/device/refreshsdk` | `serial` | 探测可达性 + 同步通道目录 |
+
+`adddahua` **只写设备行，不立即拉目录** —— 拉目录可能耗时十几秒，
+失败也不该回滚"设备已添加"这件事。
+
+### 9.2 复用既有表的做法
+
+`DeviceProvisionService` **不直接写通道表**：把 provider 报的通道转成
+`CatalogItem`，交给既有的 `DeviceService.saveCatalog(deviceId, items, true, size, 1)`。
+那里已经处理好了新增/更新/幽灵通道清理/设备自身通道。
+
+结果：大华设备与国标设备**在库里长得完全一样**，前端通道列表、点播、云台、
+录像接口**一行都不用改**。
+
+设备表新增一列 `username`（`schema.sql` 里含 `ALTER ... IF NOT EXISTS` 迁移）：
+国标 Digest 只校验密码，所以这列一直是空的；SDK 登录两个都必填。
+`source` 字段复用既有值：`gb28181`（或历史值 `device`）/ `dahua`。
+
+### 9.3 云台命令路由（2026-11 起改为统一接口）
+
+> **本节已过时的一半已删掉。** 早期 `ControlService.sendPtz()` 用一个
+> `ptzCmdToSdkCommand(hex)` 把国标 PTZCmd 的十六进制反解成方向词，
+> 那层翻译在统一接口后**已不存在**，详见 §9.5。
+>
+> 保留下面这张对照表是因为它记录了一个真实踩过的坑，重新引入「hex 反解」
+> 这种设计时会再踩一次。
+
+| 码值 | 含义 | 方向词 |
+|---|---|---|
+| `0x00` | 停止 | `stop` |
+| `0x01`~`0x0F` | 方向位（可叠加斜向） | `up` / `down` / `left` / `right` / `upright` … |
+| `0x10` / `0x20` | 变倍放大 / 缩小 | `zoomin` / `zoomout` |
+| `0x41` / `0x42` | 聚焦远 / 近 | `focusfar` / `focusnear` |
+| `0x44` / `0x48` | 光圈放大 / 缩小 | `irisin` / `irisout` |
+| 其它（`0x81`+） | 预置位 / 巡航 / 扫描 / 辅助开关 | 无法映射，必须明确报错 |
+
+> **必须按指令族整体匹配，不能只做方向位与运算。**
+> 聚焦/光圈的码值 `0x41/0x42/0x44/0x48` 低位恰好与方向位重合：
+> `0x41 & 0x01(右)`、`0x42 & 0x02(左)`、`0x44 & 0x04(下)`、`0x48 & 0x08(上)`。
+> 早期只做位与，现场表现是**点光圈云台上下动、点聚焦云台左右动**。
+> 同类还有预置位 `0x81`（低两位 `01`）会被当成「右」——
+> 点「设置预置位」结果镜头转走了。
+
+**现在的做法**：接口直接接收方向词，两个实现各自编码（国标编 PTZCmd、
+大华直接调 SDK），那一层反解连同它的坑一起消失。所以 `PtzCmdMappingTest`
+也一并删除了 —— 它测的代码已经不存在。
+
+### 9.3.1 IPC 与 NVR 的云台通道号不同
+
+大华 SDK 里「通道」有两套口径：
+
+| 形态 | 云台/取流通道号 |
+|---|---|
+| IPC（直连单机摄像机，`NET_IPC_SERIAL = 20`） | **0**（设备自身） |
+| NVR / DVR（下挂摄像机） | **1~N** |
+
+用 1 去控 IPC **不会报错、SDK 依然返回 `true`**，只是设备什么都不做。
+实测同一台 IPC：
+
+```
+通道 0：UP 后 tilt -111 → -150，变倍后 zoom 6 → 11   ← 真的在动
+通道 1：前后完全一致                                  ← 死命令
+```
+
+判定靠登录应答的 `NET_DEVICEINFO_Ex.byDVRType`：
+`DahuaSdk.Session#ipc()` → 云台通道用 `index - 1`。登录日志会打印选了哪套口径。
+
+### 9.5 控制命令的统一入口（2026-11 重构）
+
+**一条命令进来，先选实现，再调方法。选实现只发生一次。**
+
+```
+Controller → ControlService（纯转发）
+                → DeviceControlResolver.of(channelId)      ← 唯一一次分歧
+                     ├─ Gb28181DeviceControl  30 项能力全部覆写
+                     └─ DahuaDeviceControl    只覆写做得到的 14 项
+```
+
+| 类 | 位置 | 职责 |
+|---|---|---|
+| `DeviceCapability` | `starter/service/control/` | 30 项能力枚举，是「能力名 + 原因 + 前端可用性」的唯一来源 |
+| `DeviceControl` | 同上 | 32 个方法**全带默认实现，默认就抛「不支持」** |
+| `Gb28181DeviceControl` | 同上 | 国标 MANSCDP 报文，全能力实现 |
+| `DahuaDeviceControl` | 同上 | 大华 SDK，只覆写 14 项，其余继承默认异常 |
+| `DeviceControlResolver` | 同上 | 入口处分流一次，**永不返回 null** |
+
+改造前 `ControlService` 是 1029 行、32 个方法，其中 `providerOf(...) != null`
+出现 31 次，每个方法都是「判协议 → 走国标 / 走 SDK」的双份逻辑，还漏了 2 个
+（`ptzPrecise` / `subscribe` 没有分支，把 SDK 设备当国标往 SIP 里发）。
+
+**接新厂商只需两步**：写一个 `@Component XxxDeviceControl implements DeviceControl`
+覆写做得到的方法，然后在 `capabilities()` 里如实声明。
+Resolver 用 `List<DeviceControl>` 注入，自动收 —— 不用改任何现有代码。
+
+#### 能力表怎么用
+
+```http
+GET /api/v1/device/capabilities?serial=10001
+```
+```json
+{
+  "kind": "dahua",
+  "supported": ["PTZ", "FOCUS_IRIS", "PRESET", "REBOOT", ...],
+  "unsupported": [
+    {"capability": "FORCE_I_FRAME", "label": "强制关键帧",
+     "reason": "大华 NetSDK 没有强制关键帧接口；需要立即刷新画面请改用「重新打开预览」"}
+  ]
+}
+```
+
+前端 `useDeviceCapabilities` composable 取一次，按钮用
+`cap.disabled('FORCE_I_FRAME', 原有禁用条件)` 决定置灰、
+`cap.tip('FORCE_I_FRAME', '默认提示')` 取 tooltip。
+
+**不支持的项连原因一起返回**：只返回支持列表会让用户看到按钮凭空消失，
+以为是自己找错了地方。前端也**不隐藏按钮，只置灰**。
+
+**取不到能力表时一律当「全支持」**：旧后端没有这个端点、或网络抖动时，
+锁死整个云台面板比「点了再报错」更伤可用性。
+
+#### 为什么云台不走 `DeviceAccessProvider#ptz`
+
+那条入口把会话寄在 `DeviceContext` 上，而它由设备表的 `remoteIp/remotePort`
+构造（CLIENT 模式、无 serial）。**设备主动注册时 `remoteIp` 可能是旧地址或
+内网地址**，按 `host:port` 查不到会话，于是报「大华设备未登录」——
+而设备明明刚注册过（实测就是这个问题）。
+
+所以 `DahuaDeviceControl` 的云台改走
+`DahuaCapabilityService.requireSession`：它优先按 SN 取主动注册会话，
+与预置位、巡航、灯光、重启等所有扩展能力同一条路径。
+
+#### 什么不进统一接口
+
+`/api/v1/dahua/**` 下的这些继续保留，因为它们没有国标对应语义：
+
+| 端点 | 为什么不合并 |
+|---|---|
+| `cameraconfig/*` | CGI/RPC2 图像参数（曝光、背光、日夜…），国标无此协议 |
+| `ptz/{tour,scan,pattern,speed,limit,idle,automovement}` | 巡航组/线扫/巡迹是**配置项**，国标 MANSCDP 没有 |
+| `register/*` | 大华主动注册表 |
+| `record/download` | 私有下载协议 |
+
+把 20 个「必然抛不支持」的端点塞进 `/control` 只是把 `if` 搬进接口，不是消除它。
+统一的是**双方都有的语义**，不是「所有端点」。
+
+### 9.3.1 IPC 与 NVR 的云台通道号不同
+
+大华 SDK 里「通道」有两套口径：
+
+| 形态 | 云台/取流通道号 |
+|---|---|
+| IPC（直连单机摄像机，`NET_IPC_SERIAL = 20`） | **0**（设备自身） |
+| NVR / DVR（下挂摄像机） | **1~N** |
+
+用 1 去控 IPC **不会报错、SDK 依然返回 `true`**，只是设备什么都不做。
+实测同一台 IPC：
+
+```
+通道 0：UP 后 tilt -111 → -150，变倍后 zoom 6 → 11   ← 真的在动
+通道 1：前后完全一致                                  ← 死命令
+```
+
+判定靠登录应答的 `NET_DEVICEINFO_Ex.byDVRType`：
+`DahuaSdk.Session#ipc()` → 云台通道用 `index - 1`。登录日志会打印选了哪套口径。
+
+RTSP 地址仍用 `channel=1`（另一套编号机制，实测取流正常），不要一起改。
+
+### 9.4 配置前缀为什么是 `dahua.*` 而不是 `gb28181.dahua.*`
+
+大华 SDK 直连是**与国标并列的第二条接入通道**，不是国标的一部分 ——
+它不经过 SIP、不用 MANSCDP、不需要平台 20 位编码。
+挂在 `gb28181` 前缀下会暗示「这是国标的一个子项」，语义上是错的，
+也会让人误以为改它会影响国标链路。
+
+同理，将来接海康、宇视时应当是并列的 `hikvision.*` / `uniview.*`。
+
+分开还有个实际好处：`Gb28181Properties` 已有 300 多行、20 多个配置项，
+把厂商私有参数混进去会让「哪些是国标标准、哪些是厂商扩展」彻底看不清。
+
+| 配置 | 含义 |
+|---|---|
+| `dahua.enabled` | 是否启用大华接入（默认 true；原生库缺失本来就会自动降级） |
+| `dahua.rtsp-port` | 设备 RTSP 端口，默认 554 |
+| `dahua.channel-total` | 设备通道总数；0 = 用登录时上报的 `byChanNum`（推荐） |
+| `dahua.server-mode.enabled` | 是否开启主动注册监听，**默认 false** |
+| `dahua.server-mode.bind-ip` / `port` | 监听地址与端口，默认 `0.0.0.0:9500` |
+| `dahua.server-mode.expire-seconds` | 注册记录失效阈值，默认 180 |
+
+### 9.6 云台配置项与实测取值（`DahuaPtzConfigService`）
+
+**走 CGI 而不是 SDK 的 JSON 配置接口**：这台设备对
+`CLIENT_GetNewDevConfig("PtzTour")` / `("PtzAutoMovement")` 一律返回失败，
+但同样的项通过 `configManager.cgi` 能正常读写（设备 Web 界面走的就是这条路）。
+
+配置项对照（2026-11 在 192.168.10.156 逐页核对设备「PTZ設置」菜单）：
+
+```
+巡航群組    PtzTour[ch][route].Enable / Name / Path / Presets[slot][0..2]
+線性掃描    AutoScan[ch][idx].LeftEnable / RightEnable / Left|RightPosition[3]
+                                / Left|RightZoomMapValue / Left|RightFocusMapValue
+                                / ScanDirection / ScanSpeed
+巡跡        AutoPattern[ch][idx].Enable / Name
+PTZ速度     PtzSpeed[ch].PtzSpeed / PatternSpeed
+閒置動作    IdleMotion[ch].Enable / Function / PresetId / TourId / PatternId
+                                 / ScanId / Timer(分钟)
+已排定工作  PtzAutoMovement[ch][idx].Enable / Function / PresetId / TourId / PatternId
+                                 / ScanId / AutoHoming.Time(秒) / TimeSection[7][6]
+旋轉限制    PtzLimit[ch].Enable / HorizontalLimitEnable
+当前运行    PtzMovement[ch].Function / Index / TaskName
+```
+
+实测取值约束（**不要照抄「文档上看起来合理」的数**）：
+
+| 项 | 真实范围 | 备注 |
+|---|---|---|
+| `PtzSpeed[ch].PtzSpeed` | **0~4** | 写 5 直接 Bad Request；设备 UI 是低/中/高三档 |
+| `PtzSpeed[ch].PatternSpeed` | 0~8 | **出厂就是 5**，限成 0~4 会导致速度页永远保存失败 |
+| `Presets[slot][0]` | 预置位下标 | **0-based**：写 1 设备界面显示「預置點2」，平台对外 1-based |
+| `Presets[slot][1]` | 0~3600 秒 | 写 0 会被设备改回默认 15 |
+| `Presets[slot][2]` | **0~10** | 设备 UI 下拉 1~10，不是 1~8 |
+| `AutoScan[ch][n].ScanSpeed` | 0~7 | 写 8 Bad Request |
+| `IdleMotion[ch].Timer` | 1~60 分钟 | 0 和 61 都 Bad Request |
+| `AutoHoming.Time` | 秒 | UI 提示 5~86400，但设备不校验（0 和 86401 都收） |
+| `AutoPan[ch].PanSpeed` | **0~7** | 设备界面显示 1~8（内部值 +1），对外用 1~8、写入时 −1 |
+
+**`PtzSpeed` 只能通过 RPC2 写**：CGI 写 `PtzSpeed[0].PtzSpeed=4` 返回 OK 但值不变。
+
+**通道下标与 SDK 一致**：IPC 是 0，NVR 是 1~N。不要 +1，否则写到不存在的通道上
+（设备对越界下标通常静默忽略，表现为「保存成功但没生效」）。
+
+### 9.7 配置读取的双通路（CGI / SDK）
+
+| 通路 | 穿透 NAT | 读得全 |
+|---|---|---|
+| CGI `configManager.cgi` | ❌ HTTP 直连设备 80 | ✅ 最全（设备 Web 界面走这条）|
+| SDK `CLIENT_GetNewDevConfig` | ✅ 走已建立的登录会话 | 多数项可以，个别型号对 `PtzTour` 返回失败 |
+
+**采用「CGI 优先，失败降级 SDK」**：SDK 读到部分字段也返回非空，
+若因此跳过 CGI，读不全的字段会静默丢失，用户一保存就把缺的字段写没了。
+所以内网部署行为与改造前完全一致，只有 CGI 连不上才降级。
+
+**熔断**：NAT 下 12 个配置项各等一次连接超时（3 秒）就是 36 秒，
+前端 30 秒超时后报「请求超时」。判定「Web 端口不可达」后记住，
+后续配置项直接走 SDK，总共只等一次。按「设备 + host:port」记，
+设备重连换出口地址会自动解除。
+
+`DahuaExtAccess.readConfigFlat()` 把 SDK 的 JSON 转成**与 CGI 逐字符相同的键路径**
+（`PtzSpeed[0].PtzSpeed`），12 个 parse 方法零改动。
+
+## 10. 尚未解决
+
+- **无大华真机**：已验证「原生库从 jar 解压 → `CLIENT_Init` 成功 →
+  SDK 版本 2.40.63」，以及不可达设备的降级（1.5 秒返回、不抛异常）。
+  但登录、目录、云台、抓图全部**未联调**。
+  厂商私有协议细节必须以真机为准 —— 本项目已多次踩到「文档写了但设备不这么做」
+  （npt 定位、对话框 tag、时间格式）。
+- **许可条款**：需确认大华允许的分发形式（是否必须随硬件绑定、
+  能否在客户现场部署时下发），这决定后续交付方式。
+- **对讲是否真需要 avnetsdk**：需真机验证；不需要的话可再省 29.47 MB。
+- ~~**`DeviceAccessTest.java` 已丢失**~~：已在 `sdk-dahua/src/test/` 补齐，
+  26 个单测覆盖 `DeviceKind.of` 兜底、`ConnectMode.of` 别名、
+  `DeviceContext.connectable` 两套判据、云台方向映射、通道号反解、流地址生成。
+- ~~**SERVER 模式未接线**~~：已由 `DahuaConfiguration` 接线，
+  配置项 `dahua.server-mode.enabled=true` 开启（默认关闭）。
+- **预览/回放走 RTSP 未接线**：见 §7，`liveStreamUri()` / `playbackStreamUri()`
+  已实现并验证输出格式，但尚未接入 `zlm4j` 的 proxy player 真正拉流。

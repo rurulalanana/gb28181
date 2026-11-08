@@ -1,0 +1,309 @@
+package io.github.rurulalanana.starter.service;
+
+import io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem;
+import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.deviceaccess.DeviceAccessProvider;
+
+import io.github.rurulalanana.deviceaccess.DeviceContext;
+import io.github.rurulalanana.deviceaccess.DeviceKind;
+import io.github.rurulalanana.deviceaccess.DeviceRegisterTable;
+import io.github.rurulalanana.deviceaccess.ConnectMode;
+import io.github.rurulalanana.starter.entity.GbDevice;
+import io.github.rurulalanana.starter.mapper.GbDeviceMapper;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 非国标设备（SDK 直连）的纳管与目录同步。
+ *
+ * <h3>为什么单独一个服务，而不是塞进 DeviceService</h3>
+ * {@code DeviceService} 的入口是 <b>SIP 事件</b>（注册/心跳/目录应答），
+ * 数据是设备自己推上来的；而 SDK 直连是<b>平台主动去问</b>，
+ * 触发方式、错误语义、重试策略都不同。混在一起会让
+ * 「设备主动注册」和「平台主动探测」两条路径互相污染。
+ *
+ * <h3>复用点：一切落库都走既有实现</h3>
+ * 本服务<b>不直接写通道表</b>：目录同步一律转成 {@link CatalogItem}，
+ * 交给 {@link DeviceService#saveCatalog} —— 那里面已经处理好了
+ * 「新增/更新/幽灵通道清理/设备自身通道」的全部边界情况。
+ * 这样大华设备和国标设备在库里长得完全一样，
+ * 前端的通道列表、点播、云台、录像接口一行都不用改。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DeviceProvisionService {
+
+    private final GbDeviceMapper deviceMapper;
+    private final DeviceService deviceService;
+    private final DeviceAccessRegistry accessRegistry;
+    private final DeviceRegisterRegistry registerRegistry;
+
+    /**
+     * 纳管一台 SDK 直连设备。
+     *
+     * <p>只落设备行，<b>不立即拉目录</b> —— 调用方通常在纳管后马上要返回、
+     * 而拉目录可能耗时数秒（设备慢时十几秒）。目录由 {@link #refreshCatalog}
+     * 单独触发，失败也不会把「设备已添加」这件事回滚掉。
+     *
+     * @param deviceId 平台内编号。允许沿用国标 20 位编码（推荐），
+     *                 也可以直接用设备序列号 —— 它只是 {@code gb_device} 的主键语义，
+     *                 不参与 SIP 寻址，因此不要求符合 GB 编码规则
+     * @param host     设备地址
+     * @param port     SDK 端口（大华默认 37777）
+     * @param username 登录用户名
+     * @param password 登录密码
+     * @param name     显示名，可为空（默认用 deviceId）
+     */
+    @Transactional
+    public GbDevice addDahua(String deviceId, String host, int port,
+                             String username, String password, String name) {
+        String id = trimToNull(deviceId);
+        if (id == null) {
+            throw BizException.badRequest("缺少设备编号 deviceId");
+        }
+        String ip = trimToNull(host);
+        if (ip == null) {
+            throw BizException.badRequest("缺少设备地址 host");
+        }
+        if (port <= 0 || port > 65535) {
+            throw BizException.badRequest("设备端口不合法：" + port);
+        }
+        if (trimToNull(username) == null || trimToNull(password) == null) {
+            throw BizException.badRequest("SDK 直连需要用户名与密码");
+        }
+        GbDevice existing = deviceService.findDevice(id);
+        if (existing != null && DeviceKind.of(existing.getSource()) == DeviceKind.GB28181) {
+            // 不允许把国标设备无声改成 SDK 直连：它的通道、会话、级联关系
+            // 都建立在 SIP 之上，改了会让那些数据全部悬空。
+            throw BizException.badRequest("设备 " + id + " 已通过国标接入，"
+                    + "不能改为 SDK 直连；请换一个设备编号，或先删除原设备");
+        }
+        // 提前校验实现是否可用，避免写了一条永远连不上的设备记录
+        accessRegistry.require(DeviceKind.DAHUA);
+
+        GbDevice d = existing == null ? new GbDevice() : existing;
+        d.setDeviceId(id);
+        d.setName(name == null || name.isBlank() ? id : name.trim());
+        d.setSource(DeviceKind.DAHUA.code());
+        d.setRemoteIp(ip);
+        d.setRemotePort(port);
+        d.setUsername(username.trim());
+        d.setPassword(password);
+        d.setTransport("UDP");
+        d.setUpdateTime(LocalDateTime.now());
+        if (existing == null) {
+            d.setStatus("OFF");
+            d.setOnline(false);
+            d.setCreateTime(LocalDateTime.now());
+            deviceMapper.insert(d);
+        } else {
+            deviceMapper.updateById(d);
+        }
+        log.info("已纳管 SDK 直连设备: {}@{}:{} (source={})", id, ip, port, d.getSource());
+        return d;
+    }
+
+    /**
+     * 探测设备可达性并同步目录。
+     *
+     * <p>目录同步复用 {@link DeviceService#saveCatalog}：把 provider 报的通道
+     * 转成 {@link CatalogItem} 后交给它做增删改，边界情况（幽灵通道、
+     * 设备自身通道）都已在那里处理过。
+     *
+     * @return 本次同步到的通道数
+     */
+    @Transactional
+    public int refreshCatalog(String deviceId) {
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            throw BizException.notFound("设备不存在：" + deviceId);
+        }
+        DeviceKind kind = DeviceKind.of(device.getSource());
+        if (kind == DeviceKind.GB28181) {
+            // 国标设备的目录由设备应答驱动，这里不能主动「拉」
+            throw BizException.badRequest("国标设备的目录请用 /device/fetchcatalog 下发查询");
+        }
+        DeviceAccessProvider provider = accessRegistry.require(kind);
+        DeviceContext ctx = contextOf(device);
+        if (!ctx.connectable()) {
+            throw BizException.badRequest("设备连接信息不完整（host/port）：" + deviceId);
+        }
+
+        boolean online = provider.probe(ctx);
+        device.setOnline(online);
+        device.setStatus(online ? "ON" : "OFF");
+        device.setUpdateTime(LocalDateTime.now());
+        if (online) {
+            device.setKeepaliveTime(LocalDateTime.now());
+        }
+        deviceMapper.updateById(device);
+        if (!online) {
+            log.warn("SDK 设备探测失败（不可达或凭据无效）: {}", ctx);
+            return 0;
+        }
+
+        List<DeviceAccessProvider.ChannelInfo> channels = provider.listChannels(ctx);
+        List<CatalogItem> items = toCatalogItems(channels);
+        // fullSnapshot=true：provider 返回的是设备当前完整目录，
+        // 因此设备上已删掉的通道也要跟着清掉
+        deviceService.saveCatalog(deviceId, items, true, items.size(), 1);
+        log.info("SDK 设备目录已同步: {} 通道数={}", deviceId, items.size());
+        return items.size();
+    }
+
+    /**
+     * provider 的通道信息 → 国标目录项。
+     *
+     * <p>只填 {@code saveCatalog} 实际会消费的字段：编号、名称、在离线。
+     * 其余（经纬度、厂商…）留空 —— 大华 SDK 侧拿这些要额外调用，
+     * 而它们在平台侧只用于展示，缺了不影响功能，后续需要再补。
+     */
+    private static List<CatalogItem> toCatalogItems(
+            List<DeviceAccessProvider.ChannelInfo> channels) {
+        List<CatalogItem> items = new ArrayList<>();
+        if (channels == null) {
+            return items;
+        }
+        for (DeviceAccessProvider.ChannelInfo c : channels) {
+            if (c == null || c.channelCode() == null || c.channelCode().isBlank()) {
+                continue;
+            }
+            CatalogItem item = CatalogItem.builder()
+                    .deviceId(c.channelCode())
+                    .name(c.name())
+                    .status(c.online() ? "ON" : "OFF")
+                    .build();
+            items.add(item);
+        }
+        return items;
+    }
+
+    /**
+     * 只探测可达性并刷新在线状态，<b>不拉目录</b>。
+     *
+     * <p>给定时巡检用：{@link #refreshCatalog} 会顺带做一次完整目录同步
+     * （逐通道 upsert），每 60 秒跑一遍对数据库和设备都是浪费；
+     * 而 SDK 直连设备不发心跳，必须靠这一步主动探测才能维持在线状态
+     * （否则会被心跳巡检误判离线，见 {@code DeviceService#offlineSilentDevices}）。
+     *
+     * <p><b>刻意不加 {@code @Transactional}</b>：SDK 登录是网络操作，
+     * 慢的时候几秒。放在事务里会让 {@code gb_device} 的行锁被长时间持有，
+     * 与自动接入线程的「更新设备 + upsert 通道」形成交叉等待 ——
+     * 实测直接触发 PostgreSQL {@code deadlock detected}。
+     * 状态写入交给 {@code setDeviceAndChannelsStatus}（它自带短事务）。
+     *
+     * @return 探测是否成功；设备不存在或实现缺失时返回 {@code false}
+     */
+    public boolean probeOnly(String deviceId) {
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            return false;
+        }
+        DeviceKind kind = DeviceKind.of(device.getSource());
+        if (kind == DeviceKind.GB28181) {
+            // 国标设备由 SIP 心跳维持在线，不能在这里抢着改状态
+            return false;
+        }
+        DeviceAccessProvider provider = accessRegistry.provider(kind).orElse(null);
+        if (provider == null) {
+            return false;
+        }
+        DeviceContext ctx = contextOf(device);
+        if (!ctx.connectable()) {
+            return false;
+        }
+        boolean online;
+        try {
+            online = provider.probe(ctx);
+        } catch (RuntimeException e) {
+            // 探测失败是现场常态（设备断电、网络抖动），不能把巡检循环打挂
+            log.debug("SDK 设备探测异常: {} {}", deviceId, e.toString());
+            online = false;
+        }
+        deviceService.setDeviceAndChannelsStatus(deviceId, online);
+        return online;
+    }
+
+    /**
+     * 设备记录 → 接入上下文。
+     *
+     * <h3>大华设备：此刻有主动注册会话时，必须走 SERVER 模式</h3>
+     * {@code gb_device.remote_ip/remote_port} 存的是纳管时按配置写的
+     * <b>设备服务端口</b>（大华默认 37777）。设备位于 NAT / 4G 之后时，
+     * 这个端口从平台侧<b>不可达</b>，直连必然失败 —— 实测线上表现就是
+     * 「主动注册上来了、也纳管了，但没有通道，随后变离线」：
+     * <pre>
+     *   00:00:23  大华设备登录成功: 111.198.60.180:15178（主动注册 SN=10001）  ← 真正可用的连接
+     *   00:01:42  大华设备登录失败: 111.198.60.180:37777 错误码=9              ← 拿建档地址直连
+     * </pre>
+     *
+     * <p>而设备主动注册时，平台已经在<b>那条连接</b>上登录过，
+     * 会话就在内存里。所以这里只要判断「该 SN 当前是否在注册表里」：
+     * <ul>
+     *   <li>在 → SERVER 模式，复用那条连接；</li>
+     *   <li>不在（局域网直连部署，或主动注册已断开）→ CLIENT 模式，按配置地址直连。</li>
+     * </ul>
+     *
+     * <p>不在 {@code gb_device} 上加 {@code connectMode} 列：那样只能记下
+     * 「纳管时的方式」，而设备换网、主动注册掉线重连之后这个静态值会过期。
+     * 用<b>实时会话</b>判断永远反映当下，且不需要迁移表结构。
+     */
+    private DeviceContext contextOf(GbDevice d) {
+        int channelTotal = d.getChannelCount() == null ? 0 : d.getChannelCount();
+        /*
+         * 实时注册表里查得到 = 设备正主动注册着（SERVER 模式），直接用那条连接的地址；
+         * 查不到（局域网直连部署，或主动注册已断开）= CLIENT 模式，按配置地址直连。
+         */
+        if (DeviceKind.of(d.getSource()) != DeviceKind.GB28181) {
+            DeviceRegisterTable.RegisteredDevice live = registerRegistry.lookupAny(d.getDeviceId());
+            if (live != null) {
+                return new DeviceContext(d.getDeviceId(),
+                        live.ip(), live.port(),
+                        d.getUsername(), d.getPassword(),
+                        ConnectMode.SERVER,
+                        d.getDeviceId(), channelTotal);
+            }
+        }
+        return new DeviceContext(d.getDeviceId(),
+                d.getRemoteIp(),
+                d.getRemotePort() == null ? 0 : d.getRemotePort(),
+                d.getUsername(),
+                d.getPassword(),
+                channelTotal);
+    }
+
+    private static String trimToNull(String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    /** 删除设备时一并清理（复用既有实现，避免两套删除逻辑走偏）。 */
+    public long countDahua() {
+        return deviceMapper.selectCount(Wrappers.<GbDevice>lambdaQuery()
+                .eq(GbDevice::getSource, DeviceKind.DAHUA.code()));
+    }
+
+    /**
+     * 列出所有非国标（SDK 直连）设备编号，供定时巡检主动探测。
+     *
+     * <p>与 {@link #countDahua()} 同样用 SQL 判据 {@code source}；
+     * 未知值按国标处理（与 {@code DeviceKind.of} 一致），所以这里只取明确属于 SDK 的。
+     */
+    public java.util.List<String> sdkDeviceIds() {
+        return deviceMapper.selectList(Wrappers.<GbDevice>lambdaQuery()
+                        .select(GbDevice::getDeviceId)
+                        .apply("lower(trim(coalesce(source, ''))) in ('dahua', 'netsdk')"))
+                .stream().map(GbDevice::getDeviceId).toList();
+    }
+}

@@ -1,0 +1,70 @@
+# ============================================================================
+# Git LFS —— 原生库与厂商 jar 走 LFS，其余一律普通对象
+#
+# 为什么只挑这几类：
+#   * 二进制大文件（.so / .dll / .jar）放进普通 Git 会让每次 clone 都拉全量历史，
+#     而且 delta 压缩对二进制无效，仓库只会越长越胖。
+#   * 反过来，把 *.class 也丢进 LFS 是灾难：厂商 sdk/ 里有 2.4 万个 .class，
+#     LFS 每个对象一次 HTTP 往返，clone 会慢到不可用。好在 sdk/ 已 gitignore。
+#   * 文本文件（.java / .md / .xml / .yml）保持普通对象，才能有 diff 和行级 blame。
+#
+# ⚠️ 规则顺序有意义：Git 里「后面的规则覆盖前面的」。
+#    所以通配的 `* text=auto` 必须写在最前面，LFS 的 `-text` 和 binary 规则写在后面，
+#    否则 *.so / *.jar 会被当成文本做换行归一，文件当场损坏
+#    （表现是 native 库加载时报符号缺失，极难排查）。
+# ============================================================================
+
+# ---------- 换行符归一：先定基调，源码统一 LF ----------
+*               text=auto eol=lf
+
+*.java          text eol=lf
+*.xml           text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.md            text eol=lf
+*.sh            text eol=lf
+*.properties    text eol=lf
+*.js            text eol=lf
+*.mjs           text eol=lf
+*.vue           text eol=lf
+*.css           text eol=lf
+*.scss          text eol=lf
+*.json          text eol=lf
+*.sql           text eol=lf
+*.py            text eol=lf
+
+# Windows 批处理必须 CRLF，否则 cmd.exe 会把整行当命令名解析而失败
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# ---------- 原生库（大华 NetSDK / 海康 ISUP） ----------
+*.so            filter=lfs diff=lfs merge=lfs -text
+*.so.*          filter=lfs diff=lfs merge=lfs -text
+*.dll           filter=lfs diff=lfs merge=lfs -text
+*.dylib         filter=lfs diff=lfs merge=lfs -text
+*.lib           filter=lfs diff=lfs merge=lfs -text
+*.a             filter=lfs diff=lfs merge=lfs -text
+*.pdb           filter=lfs diff=lfs merge=lfs -text
+
+# ---------- 厂商 jar（netsdk、ISUP 等，大且不可重新生成） ----------
+*.jar           filter=lfs diff=lfs merge=lfs -text
+*.war           filter=lfs diff=lfs merge=lfs -text
+
+# ---------- 文档 / 分发包 ----------
+*.pdf           filter=lfs diff=lfs merge=lfs -text
+*.zip           filter=lfs diff=lfs merge=lfs -text
+*.7z            filter=lfs diff=lfs merge=lfs -text
+*.tar.gz        filter=lfs diff=lfs merge=lfs -text
+
+# ---------- 图片 / 字体：binary 禁止任何换行转换 ----------
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.bmp           binary
+*.woff          binary
+*.woff2         binary
+*.ttf           binary
+*.eot           binary

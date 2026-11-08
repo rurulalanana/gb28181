@@ -1,0 +1,301 @@
+package io.github.rurulalanana.starter.service;
+
+import io.github.rurulalanana.dahua.ext.DahuaExtAccess;
+import io.github.rurulalanana.dahua.internal.DahuaSdk;
+import io.github.rurulalanana.gb28181.sip.zlm.EsMediaPublisher;
+import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
+import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
+import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.entity.GbDevice;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 大华 SDK 取流：SDK 拿裸 H264/H265 → 直接喂 ZLM 建流。
+ *
+ * <p>为什么不用 RTSP：那条路要平台<b>反向</b>连设备的 554 端口，设备在 NAT 后面时
+ * 根本不可达。SDK 取流走已建立的登录会话，方向与主动注册一致，天然穿透 NAT。
+ *
+ * <p>为什么要裸流而不是 PS：主动注册会话上 SDK 只给私有 DHAV、拿不到 PS。
+ * 裸流交给 {@code mk_media_input_h264/265} 建流，下游输出与国标设备完全一致。
+ *
+ * <p>只在设备当前有 SDK 会话时启用；没有会话的部署仍走 RTSP 代理，行为不变。
+ */
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class DahuaSdkStreamService {
+
+    /** 首帧等待上限：局域网通常 200ms 内到，NAT 后稍慢。 */
+    private static final long FIRST_FRAME_WAIT_MS = 3_000L;
+
+    /** 空闲回收宽限：播放器重连的间隙不能被误判成「没人看」。 */
+    private static final long IDLE_GRACE_MS = 60_000L;
+
+    private final DahuaCapabilityService capability;
+    private final DeviceService deviceService;
+    private final Gb28181MediaPlatform platform;
+
+    /** 一路 SDK 取流：SDK 句柄 + ZLM 发布器。 */
+    public record LiveStream(String key, String app, String stream,
+                             DahuaExtAccess.RealPlay realPlay, EsMediaPublisher publisher) {
+    }
+
+    /** 正在取的流：{@code deviceId/channel} → 句柄。 */
+    private final Map<String, LiveStream> running = new ConcurrentHashMap<>();
+
+    /** 各流「最近一次确认有观众」的时刻（毫秒），用于空闲回收。 */
+    private final Map<String, Long> lastViewerAt = new ConcurrentHashMap<>();
+
+    /**
+     * 设备此刻是否能用 SDK 取流。
+     *
+     * <p>判据是「有活跃 SDK 会话」而不是「设备是主动注册模式」：
+     * 局域网直连的设备同样有会话，走 SDK 一样能出图。
+     */
+    public boolean available(String deviceId) {
+        if (deviceId == null || deviceId.isBlank()) {
+            return false;
+        }
+        DahuaSdk.Session session = DahuaSdk.get().sessionBySerial(deviceId);
+        return session != null && session.valid();
+    }
+
+    /**
+     * 启动一路 SDK 取流。
+     *
+     * @param deviceId 设备编号（大华即序列号）
+     * @param channel  通道编码（{@code <deviceId>-<n>}）
+     * @return 取流句柄；失败抛异常
+     */
+    public LiveStream start(String deviceId, String channel) {
+        GbDevice device = deviceService.findDevice(deviceId);
+        if (device == null) {
+            throw BizException.notFound("设备不存在：" + deviceId);
+        }
+        DahuaSdk.Session session = DahuaSdk.get().sessionBySerial(deviceId);
+        if (session == null || !session.valid()) {
+            throw BizException.badRequest("大华设备未登录，无法 SDK 取流：" + deviceId);
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            throw BizException.badRequest("媒体服务未启动");
+        }
+
+        String key = deviceId + "/" + channel;
+        /*
+         * 已在取流就直接复用，不要「先 stop 再 start」。
+         *
+         * 多画面 / 前端并发请求（/stream/start 与 /webrtc 协商几乎同时到）时，
+         * 后到的请求会把先建好的流拆掉重建，而设备侧还没释放上一路，
+         * CLIENT_RealPlayByDataType 就会报 0x8000040A「创建套接字失败」——
+         * 表现为「点播成功了一瞬间又失败」。
+         *
+         * 复用是安全的：同一通道同一时刻只应有一路 SDK 取流，
+         * 编码与通道号都没变，返回已有句柄即可。
+         */
+        LiveStream existing = running.get(key);
+        if (existing != null && existing.realPlay().active()) {
+            log.info("大华 SDK 取流已在运行，复用: {} codec={} 累计帧={}",
+                    key, existing.publisher().codecName() == 0 ? "H264" : "H265",
+                    existing.publisher().frames());
+            return existing;
+        }
+        // 句柄已失效（设备重连过）：清掉残留再重建
+        stop(key);
+
+        int sdkChannel = sdkChannelOf(session, deviceId, channel);
+
+        /*
+         * app = 设备编码、stream = 通道编码，与国标收流的口径一致：
+         * 播放地址、ZLM 媒体源路径、前端播放器都不用区分流的来源。
+         */
+        EsMediaPublisher publisher;
+        try {
+            publisher = media.createEsPublisher(deviceId, channel);
+        } catch (RuntimeException e) {
+            throw BizException.badRequest("创建媒体源失败：" + e.getMessage());
+        }
+
+        DahuaExtAccess.RealPlay play;
+        try {
+            // dataType 只作诊断用（H265 也可能报 1004），编码由发布器从 NAL 头判定
+            play = capability.ext().startRealPlay(session, sdkChannel, key,
+                    (es, dataType) -> publisher.push(es));
+        } catch (RuntimeException e) {
+            publisher.close();
+            throw BizException.badRequest("大华 SDK 取流失败：" + e.getMessage());
+        }
+
+        /*
+         * 等首帧：ZLM 在收到媒体数据前不会真正注册流，
+         * 提前返回的播放地址前端打开是 404（表现为「有地址但播不了」）。
+         */
+        long deadline = System.currentTimeMillis() + FIRST_FRAME_WAIT_MS;
+        while (System.currentTimeMillis() < deadline && !publisher.hasFirstFrame()) {
+            try {
+                Thread.sleep(50L);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (!publisher.hasFirstFrame()) {
+            // 不留死流：SDK 句柄与媒体源一起收掉，接口明确报错
+            try {
+                play.close();
+            } catch (Throwable ignored) {
+                // 已失败，清理异常不再向上抛
+            }
+            publisher.close();
+            throw BizException.badRequest(
+                    "大华 SDK 取流超时：已登录设备但 " + FIRST_FRAME_WAIT_MS
+                            + "ms 内没有拿到视频帧。请检查该通道是否真的有画面"
+                            + "（通道号：IPC 自身是 0，NVR 下挂是 1~N）");
+        }
+
+        LiveStream live = new LiveStream(key, deviceId, channel, play, publisher);
+        running.put(key, live);
+        lastViewerAt.remove(key);
+        log.info("大华 SDK 取流已启动: {} 通道={} codec={} 累计帧={}",
+                key, sdkChannel, publisher.codecName() == 0 ? "H264" : "H265",
+                publisher.frames());
+        return live;
+    }
+
+    /**
+     * SDK 通道号。
+     *
+     * <p>与云台那条链路同一套口径：<b>IPC 自身是通道 0</b>，NVR 下挂摄像机是 1~N。
+     * 用 1 取 IPC 的码流会报 {@code 0x80000007}（参数不合法）——
+     * 实测踩过，改成 0 立刻成功。
+     */
+    private int sdkChannelOf(DahuaSdk.Session session, String deviceId, String channel) {
+        int index = io.github.rurulalanana.dahua.DahuaDeviceAccessProvider
+                .channelIndexOf(deviceId, channel);
+        return session.ipc() ? Math.max(0, index - 1) : index;
+    }
+
+    /** 停止一路 SDK 取流（幂等）。 */
+    public void stop(String key) {
+        LiveStream live = running.remove(key);
+        lastViewerAt.remove(key);
+        if (live == null) {
+            return;
+        }
+        try {
+            live.realPlay().close();
+        } catch (Throwable t) {
+            log.debug("停止 SDK 取流失败: {} {}", key, t.toString());
+        }
+        try {
+            live.publisher().close();
+        } catch (Throwable t) {
+            log.debug("关闭发布器失败: {} {}", key, t.toString());
+        }
+        /*
+         * 清通道的 stream_id —— 它是通道列表判断「有流 / 显示停止按钮」的唯一依据。
+         *
+         * 不清的后果（实测）：用户关掉页面 → 60 秒后这里静默回收了 SDK 流，
+         * 但通道列表仍然显示「停止」按钮、numOutputs=1，看起来像一直在推流。
+         * gb_stream 那条记录由 ZLM 的 onStreamOffline 事件置 CLOSED（见 StreamEventBridge），
+         * 这里只负责通道侧。
+         */
+        try {
+            deviceService.setChannelStream(live.app(), live.stream(), null);
+        } catch (Exception e) {
+            log.debug("清除通道 stream_id 失败: {} {}", key, e.toString());
+        }
+        log.info("大华 SDK 取流已释放: {}", key);
+    }
+
+    /** 某设备通道当前是否已在取流。 */
+    public boolean isRunning(String deviceId, String channel) {
+        return running.containsKey(deviceId + "/" + channel);
+    }
+
+    /** 当前正在取的流数量（诊断用）。 */
+    public int runningCount() {
+        return running.size();
+    }
+
+    /**
+     * 空闲回收：没人看就停掉 SDK 取流。
+     *
+     * <p>SDK 流没有 RtpSession，{@code StreamService.reapIdleStreams} 扫不到它，
+     * 不单独回收的话用户关掉页面后设备会一直被取流。
+     *
+     * <p>判据用 ZLM 的读者数（含 MP4 录制器），所以「只录不看」不会被误关。
+     * 通道设了常开（{@code on_demand=false}）的不回收。
+     *
+     * <p><b>不带 {@code @Scheduled}</b>：由 {@code PlatformScheduler} 通过
+     * {@code DeviceMediaProvider.reapIdle()} 统一驱动，厂商不必各自声明定时任务。
+     */
+    public void reapIdleStreams() {
+        if (running.isEmpty()) {
+            return;
+        }
+        ZlmMediaServer media = platform.mediaServer();
+        if (media == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, LiveStream> e : running.entrySet()) {
+            String key = e.getKey();
+            LiveStream live = e.getValue();
+            try {
+                /*
+                 * 常开通道不回收：录像录制中的流由 ZLM 的录制定时器维持读者数，
+                 * 但「只开常开、不录像」的通道没有读者也要一直在线。
+                 * 查库有成本，所以先用内存里的 readers 判，只有 0 读者才去查开关。
+                 */
+                int readers = media.readerCount(live.app(), live.stream());
+                if (readers > 0) {
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                if (isKeepAliveChannel(live.app(), live.stream())) {
+                    // 常开：不回收，但要持续刷新时间戳，避免关掉开关后立刻被判超时
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                Long seen = lastViewerAt.get(key);
+                if (seen == null) {
+                    // 首次采样到 0：先记时间，给播放器重连的间隙留出宽限
+                    lastViewerAt.put(key, now);
+                    continue;
+                }
+                // 设备断线（SDK 回调停了）也要回收：地址还在但永远没新帧
+                boolean stalled = now - live.publisher().lastFrameAt() > IDLE_GRACE_MS;
+                if (now - seen >= IDLE_GRACE_MS || stalled) {
+                    log.info("回收空闲的大华 SDK 流: {}（{} 秒无观众{}）", key,
+                            (now - seen) / 1000, stalled ? "，且已无新帧" : "");
+                    stop(key);
+                }
+            } catch (Exception ex) {
+                log.debug("回收 SDK 流失败: {} {}", key, ex.toString());
+            }
+        }
+    }
+
+    /**
+     * 该通道是否要求流常开（{@code on_demand = false}）。
+     *
+     * <p>查库失败时返回 {@code false}（按按需处理）：宁可多回收一次，
+     * 也不要因为一次数据库抖动把「按需」通道永久占着设备上行。
+     */
+    private boolean isKeepAliveChannel(String deviceId, String channelId) {
+        try {
+            var ch = deviceService.findChannel(deviceId, channelId);
+            return ch != null && Boolean.FALSE.equals(ch.getOnDemand());
+        } catch (Exception e) {
+            log.debug("读取通道按需设置失败（按按需处理）: {}/{} {}", deviceId, channelId, e.toString());
+            return false;
+        }
+    }
+}

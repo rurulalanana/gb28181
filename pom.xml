@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>gb28181</artifactId>
+  <version>1.0.0</version>
+  <packaging>pom</packaging>
+
+  <name>gb28181</name>
+  <description>
+    GB/T 28181 视频监控平台 —— 单仓库父子工程。
+
+    模块与职责（全部 Java 17）：
+      gb28181-sip                信令（SIP / MANSCDP / SDP / 级联 / 集群）
+      gb28181-sip-zlm            媒体（内嵌 ZLMediaKit、RTP 收流、回放）
+      device-access              设备接入契约（厂商无关 SPI，零 Spring）
+      sdk-dahua                  大华 NetSDK 实现
+      sdk-hikvision              海康 ISUP(EHome) 实现
+      gb28181-platform-starter   平台应用（Spring Boot 3 + Vue 前端）
+
+    依赖方向（单向，不可反向）：
+      starter → sip-zlm → sip
+      starter → sip
+      starter → sdk-dahua     → device-access
+      starter → sdk-hikvision → device-access
+
+    统一 Java 17：
+      早期 sip / sip-zlm 是 Java 8，为了让只跑 JDK 8 的对接方也能用这两个协议库。
+      合并成单仓库后整个平台只交付一个 Spring Boot jar，两个协议库不再独立发布，
+      因此统一到 17。副作用：sip 1.0.14 / sip-zlm 1.0.11 已按 8 发布过，
+      再发版必须提版本号（字节码版本从 52 变成 61，JDK 8/11 无法加载）。
+
+    关于 spring-boot-starter-parent：
+      Java 只允许一个 parent，所以 gb28181-platform-starter 不能再继承
+      spring-boot-starter-parent，改为 import spring-boot-dependencies BOM，
+      等价拿到全部依赖版本管理；插件侧只有 spring-boot-maven-plugin 需要显式配置。
+
+    构建：
+      mvn clean install -DskipTests
+      mvn clean install -DskipTests -pl gb28181-sip,gb28181-sip-zlm,device-access,gb28181-platform-starter
+  </description>
+  <url>https://github.com/rurulalanana/gb28181</url>
+
+  <modules>
+    <module>gb28181-sip</module>
+    <module>gb28181-sip-zlm</module>
+    <module>device-access</module>
+    <module>sdk-dahua</module>
+    <module>sdk-hikvision</module>
+    <module>gb28181-platform-starter</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+    <!--
+      全工程统一 Java 17。
+
+      【历史】早期 sip / sip-zlm 是 Java 8（为了让只跑 JDK 8 的对接方也能用这两个协议库）。
+      合并成单仓库父子工程后统一到 17：整个平台只交付一个 Spring Boot jar，
+      sip / sip-zlm 不再作为独立可被第三方直接依赖的产物单独发布。
+
+      【代价，改动前请知情】sip 1.0.14 / sip-zlm 1.0.11 已按 Java 8 字节码发布过。
+      统一到 17 后产出的 class 文件版本是 61，JDK 8 / 11 的用户无法加载。
+      因此后续发布这两个模块必须提版本号，不能原地覆盖已发布的 1.0.14 / 1.0.11。
+
+      各模块都用 maven.compiler.release 声明，不写 source/target：
+      release 会同时校验「语法级别」与「平台 API」，能拦住
+      「本地 JDK 21 能过、目标 JDK 17 上跑不起来」这类问题。
+    -->
+    <java.version>17</java.version>
+    <maven.compiler.release>${java.version}</maven.compiler.release>
+
+    <!-- ========== 第三方依赖版本（全模块统一） ========== -->
+    <slf4j.version>1.7.36</slf4j.version>
+    <junit.version>5.10.2</junit.version>
+    <junit4.version>4.13.2</junit4.version>
+    <jackson.version>2.15.4</jackson.version>
+    <commons.lang3.version>3.12.0</commons.lang3.version>
+
+    <!-- ========== 插件版本 ========== -->
+    <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+    <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+    <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
+    <maven.clean.plugin.version>3.2.0</maven.clean.plugin.version>
+    <maven.install.plugin.version>3.1.4</maven.install.plugin.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- ========== 本项目内部模块（升级只改这里） ========== -->
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>gb28181-sip</artifactId>
+        <version>1.0.14</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>gb28181-sip-zlm</artifactId>
+        <version>1.0.11</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>device-access</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>sdk-dahua</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>sdk-hikvision</artifactId>
+        <version>1.0.0</version>
+      </dependency>
+
+      <!-- ========== 通用第三方 ========== -->
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>${slf4j.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>${junit.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>junit</groupId>
+        <artifactId>junit</artifactId>
+        <version>${junit4.version}</version>
+        <scope>test</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <!--
+          只统一插件【版本】。各模块自己决定 configuration
+          （尤其 maven-compiler-plugin 的 release：sip/sip-zlm 是 8，其余是 17）。
+        -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>${maven.clean.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>${maven.compiler.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven.jar.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>${maven.surefire.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>${maven.install.plugin.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+
+</project>

@@ -1,0 +1,82 @@
+# ============================================================================
+# 根 .gitignore —— 只管根目录这一层
+#
+# 六个子模块各自保留自己的 .gitignore（嵌套 .gitignore 在单仓库里照样生效），
+# 它们写得很细（例如 sdk-dahua 里 lib/* 白名单放行 lib/linux64、lib/win64），
+# 这里再重复一遍反而容易两边打架。这里只补根目录独有的东西。
+# ============================================================================
+
+# ---------- 构建产物 ----------
+target/
+**/target/
+*.class
+*.ori
+*.rej
+
+# ---------- IDE / OS ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.settings/
+.project
+.classpath
+.DS_Store
+Thumbs.db
+
+# ⚠️ .vscode/mcp.json 里存着数据库口令与服务器 SSH 凭据，绝不能入库。
+# 整个目录一起忽略，需要共享的配置写进文档而不是提交这里。
+.vscode/
+
+# ---------- 本地运行产物 ----------
+*.log
+logs/
+**/logs/
+local-run.*
+gb28181-local.log
+hs_err_pid*.log
+replay_pid*.log
+
+# ---------- 临时脚本 / 一次性排查产物 ----------
+# 根目录历史上堆过一批 inspect_*.py / fix_*.py 之类的一次性脚本，
+# 它们改完 pom 就没用了。真要长期保留的脚本放 scripts/ 下。
+/pom-backup-*/
+.pom-backup-*/
+
+# ⚠️ 只忽略根目录的 *.sha1（当初遗留的 netsdk 校验文件）。
+# 不能写成全局 *.sha1 —— sdk-dahua/lib/netsdk-repo 是 Maven 本地仓库镜像，
+# 里边的 .sha1 是它的校验文件，漏了会让离线构建报校验失败。
+/*.sha1
+
+# ---------- 分发包（发布用，不入库） ----------
+/gb-win-agent.zip
+/gb-win-agent/
+
+# ---------- 第三方厂商 SDK 原始包 ----------
+# sdk/ 是厂商官方解压包（大华 ~324MB、海康更大），GPL/许可也不允许随仓库分发。
+# 构建只需要 lib/<platform>/ 里的原生库，那部分已入库并走 Git LFS。
+sdk/
+
+# ---------- AI 工具目录 ----------
+.agents/
+.workbuddy/
+
+# ---------- 本地敏感配置 ----------
+.env
+.env.*
+!.env.example
+**/src/main/resources/application-local.yml
+**/src/main/resources/application-local.yaml
+**/src/main/resources/application-*.local.yml
+**/src/main/resources/application-*.local.yaml
+
+# ---------- 前端 ----------
+node_modules/
+**/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# ---------- Python ----------
+__pycache__/
+*.pyc

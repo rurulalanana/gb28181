@@ -1,0 +1,42 @@
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# 手工联调时生成的 classpath 清单（探针要用，但路径随机器变化，不入库）
+cp.txt
+
+# ============ 大华 NetSDK ============
+# sdk/ 是官方 SDK 的原始解压包（约 700 MB，含全部平台与 demo），
+# 体积大且非必要 —— 仓库只保留构建真正需要的部分，因此整体忽略。
+sdk/
+
+# lib/<platform>/ 与 lib/netsdk/ 是**入库的**（见下方 ! 规则）。
+# 这样其他电脑 clone 后无需安装 SDK 即可直接构建。
+# 注意：保留原有忽略规则是为了拦住 lib/ 下将来可能出现的其它残留文件。
+
+# 兜底：除下方显式放行的目录外，lib/ 下其它内容一律忽略
+lib/*
+!lib/linux64/
+!lib/win64/
+!lib/netsdk-repo/
+
+# 原生库二进制（lib/linux64、lib/win64 下由上面的 ! 规则放行）
+*.dylib
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+logs/
+*.log

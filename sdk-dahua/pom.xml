@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.rurulalanana</groupId>
+    <artifactId>gb28181</artifactId>
+    <version>1.0.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>sdk-dahua</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>sdk-dahua</name>
+  <description>
+    大华设备接入实现：基于 device-access 契约的 NetSDK 实现。
+
+    与国标链路（gb28181-sip / gb28181-sip-zlm）**并列**，不是它的子模块：
+    本模块不经过 SIP、不用 MANSCDP、不需要平台 20 位编码。
+
+    命名约定为 sdk-&lt;厂商&gt;：海康是平级的 sdk-hikvision，宇视是 sdk-uniview。
+    契约包已抽到独立的 device-access 模块，各家厂商实现不再互相依赖。
+  </description>
+  <url>https://github.com/rurulalanana/gb28181/tree/main/sdk-dahua</url>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <slf4j.version>1.7.36</slf4j.version>
+    <jna.version>5.13.0</jna.version>
+    <!--
+      Jackson 版本与 Spring Boot 3.2.5 管理的版本对齐（2.15.4）。
+      本模块被 gb28181-platform-starter 引用，版本不一致会导致运行时
+      两个 jackson-databind 同时出现在 classpath 上，出现
+      NoSuchMethodError 这种很难查的问题。
+    -->
+    <jackson.version>2.15.4</jackson.version>
+    <junit.version>5.10.2</junit.version>
+    <!-- 设备接入契约模块版本。 -->
+    <deviceaccess.version>1.0.0</deviceaccess.version>
+    <!-- 大华 NetSDK 的 Java 部分（class 文件，4.7 MB）。
+         大华不提供公开 Maven 仓库，因此 jar 随本仓库携带在
+         lib/netsdk/netsdk-3.061.jar，由下方 install-netsdk-jar 自动装进本地仓库，
+         做到 clone 即可构建。 -->
+    <netsdk.version>3.061</netsdk.version>
+    <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+    <!-- 不要升到 3.4.x：它依赖 plexus-archiver 的新版 API，
+         与本机 Maven 3.6.3 的 ClassRealm 不兼容，打包时报
+         "org.codehaus.plexus.archiver.FileSet" 的 NoClassDefFoundError。 -->
+    <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+    <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
+    <maven.install.plugin.version>3.1.4</maven.install.plugin.version>
+
+    <!--
+      当前激活平台的原生库目录名，由底部 profile 按操作系统覆盖。
+
+      默认 linux64：生产环境是 Linux，本地开发若忘了加 profile 也不至于
+      产出一个「只能在 Windows 跑」的包被误部署。反过来（默认 win64）
+      的后果严重得多 —— 部署到服务器后报「Unable to load library」，
+      而这个错看起来像路径问题，很容易查偏。
+    -->
+    <netsdk.platform>linux64</netsdk.platform>
+  </properties>
+
+  <!--
+    随仓库携带的本地 Maven 仓库，用于 com.netsdk:netsdk。
+
+    【为什么用 file:// 仓库而不是 install:install-file】
+    Maven 在**依赖解析阶段**就要找到 netsdk，而这发生在任何插件执行之前
+    （包括 initialize 阶段的 install-file）。实测把 install-file 绑到
+    initialize 仍然报「artifact has not been downloaded from it before」。
+    <repositories> 参与依赖解析本身，因此是唯一能做到「clone 即可构建」的方式。
+
+    目录结构是标准 Maven 布局：
+      lib/netsdk-repo/com/netsdk/netsdk/3.061/{netsdk-3.061.jar, .pom}
+
+    4.7 MB，只含 Java class，不含原生库。
+    版权归大华所有，仅限在已获授权的设备接入场景使用。
+  -->
+  <repositories>
+    <repository>
+      <id>sdk-dahua-bundled</id>
+      <name>sdk-dahua 随仓库携带的本地构件</name>
+      <url>file:///${project.basedir}/lib/netsdk-repo</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <!-- 厂商无关的接入契约。单独成模块，sdk-dahua / sdk-hikvision 都依赖它。 -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>device-access</artifactId>
+      <version>${deviceaccess.version}</version>
+    </dependency>
+
+    <!-- provided：不打进本模块产物、也不传递给上游。
+         使用方需要显式声明 compile 依赖（平台的交付形态是单 jar 部署）。 -->
+    <dependency>
+      <groupId>com.netsdk</groupId>
+      <artifactId>netsdk</artifactId>
+      <version>${netsdk.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>net.java.dev.jna</groupId>
+      <artifactId>jna</artifactId>
+      <version>${jna.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+
+    <!--
+      大华大量能力以 JSON 配置项的形式提供（VideoInOptions / Record / PtzPreset …），
+      而设备返回的是「完整响应包 + 业务层」双层结构。
+
+      早期为了「运行期依赖只保留 JNA + slf4j」而手写字符串扫描（找 key、读后面的数字、
+      手写括号配对）—— 那段代码难读且易错（字符串里的 {{"}}" 与转义引号都要自己处理）。
+      现在引 Jackson：解析成树、按字段名取、改完再序列化回来，行数与出错面都小一个数量级。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <!--
+        原生库按平台打进 jar 根目录：<platform>/*.so|*.dll
+
+        LibraryLoad 用 getResourceAsStream("<platform>/libdhnetsdk.so") 读取，
+        所以必须是 jar 根下的平台目录，不能放在子目录里。
+
+        lib/ 整个目录在 .gitignore 中（厂商许可），构建前须按
+        docs/原生库打包.md §1 从官方 SDK 生成，否则本模块构建失败。
+      -->
+      <resource>
+        <directory>src/main/resources</directory>
+      </resource>
+      <resource>
+        <directory>lib/${netsdk.platform}</directory>
+        <targetPath>${netsdk.platform}</targetPath>
+        <includes>
+          <include>*.so</include>
+          <include>*.dll</include>
+        </includes>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${maven.compiler.plugin.version}</version>
+        <configuration>
+          <!-- 用 release 而不是 source/target：release 同时约束可用的 API 集合，
+               避免在 JDK 21 上编出只能跑 21 的字节码却以为目标是 17。 -->
+          <release>${java.version}</release>
+          <encoding>${project.build.sourceEncoding}</encoding>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${maven.surefire.plugin.version}</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>${maven.jar.plugin.version}</version>
+      </plugin>
+
+      <!--
+        切换平台前清掉另一个平台残留的目录。
+
+        【为什么必须显式清理】maven-resources-plugin 只「复制」，从不删除。
+        在 Windows 上先打 win64 包、再 -Dnetsdk.platform=linux64 打 Linux 包时，
+        target/classes/win64/ 会原样留着，最终 jar 里同时含两个平台的库：
+
+          - jar 体积翻倍（Linux 20.5 MB → 双平台 35 MB）
+          - 更糟的是「看起来能跑」：Windows 上加载 win64、Linux 上加载 linux64，
+            两个平台都不会报错，于是这个缺陷要到很久以后（比如发现 jar 太大、
+            或某个平台缺库却仍能启动）才暴露
+
+        本项目其余模块用 `mvn clean package` 规避，但聚合构建的标准命令是
+        `mvn -o install -DskipTests`（不带 clean），所以不能只靠调用方记得。
+
+        用 maven-clean-plugin 的额外执行（不是 antrun）在 generate-resources
+        阶段删掉所有平台目录，保证 target/classes 里只会有本次选中的那一个。
+
+        为什么不用 antrun：本机是离线构建（-o），antrun 依赖 org.apache.ant:ant，
+        本地仓库里没有，会直接报 PluginResolutionException。
+        clean 插件是 Maven 自带、必然存在的，且它的 filesets 正好能做定向删除。
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-clean-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>purge-other-platform-natives</id>
+            <phase>generate-resources</phase>
+            <goals>
+              <goal>clean</goal>
+            </goals>
+            <configuration>
+              <!-- 只删平台目录，不碰 target/classes 下的 io/（已编译的 class） -->
+              <excludeDefaultDirectories>true</excludeDefaultDirectories>
+              <filesets>
+                <fileset>
+                  <directory>${project.build.outputDirectory}</directory>
+                  <includes>
+                    <include>linux64/**</include>
+                    <include>win64/**</include>
+                    <include>linux32/**</include>
+                    <include>win32/**</include>
+                    <include>mac64/**</include>
+                    <include>linuxARM/**</include>
+                  </includes>
+                </fileset>
+              </filesets>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!--
+      平台选择：默认按操作系统自动激活，交叉打包用 -D 覆盖。
+
+        mvn install                                  → 按当前系统选
+        mvn install -Dnetsdk.platform=linux64        → 强制出 Linux 包
+        mvn install -Dnetsdk.platform=win64          → 强制出 Windows 包
+
+      【为什么用 -D 而不是 -P 切换】
+      Maven 里「显式 -P 激活」与「<activation> 自动激活」的 profile 会<b>同时生效</b>，
+      谁最后被求值谁赢，无法靠声明顺序保证显式指定优先。实测在 Windows 上执行
+      -Pnetsdk-linux64 仍然打出 win64 包 —— 自动激活的 win64 覆盖了它。
+
+      而 -D 传入的是「用户属性」，在 Maven 的属性解析顺序里优先级最高
+      （用户属性 > profile 属性 > pom 属性），因此一定能覆盖 profile 里设的值。
+    -->
+    <profile>
+      <id>netsdk-linux64</id>
+      <activation>
+        <os>
+          <family>unix</family>
+          <name>linux</name>
+        </os>
+      </activation>
+      <properties>
+        <netsdk.platform>linux64</netsdk.platform>
+      </properties>
+    </profile>
+
+    <profile>
+      <id>netsdk-win64</id>
+      <activation>
+        <os>
+          <family>windows</family>
+        </os>
+      </activation>
+      <properties>
+        <netsdk.platform>win64</netsdk.platform>
+      </properties>
+    </profile>
+  </profiles>
+
+</project>

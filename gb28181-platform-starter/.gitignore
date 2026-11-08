@@ -1,0 +1,76 @@
+target/
+record/
+*.iml
+.idea/
+.vscode/
+.DS_Store
+hs_err_pid*.log
+replay_pid*.log
+
+# 本地运行日志：体积大、含设备 IP 与调试细节，一律不入库。
+# start-local.bat 写 local-run.log，start-platform.bat 写 ../gb28181-local.log（在仓库外）。
+local-run*.log
+local-run.err
+local-run.err.log
+gb28181-local.log
+
+# 大华设备联调草稿：抓包转储、配置项 dump、一次性探测脚本。
+# 这些是排障过程产物，不是项目代码。
+/_*.txt
+/_*.py
+/a[0-9].py
+diag.ps1
+
+# Python 字节码（scripts/ 下跑过 py 就会生成）
+__pycache__/
+*.pyc
+
+# ============ 标准正文（严禁入库） ============
+# GB/T 28181 是国家标准正文，受版权保护，公开仓库不得分发。
+# 需要时请自行从标准发布渠道获取，放在本目录下仅供本地查阅。
+docs/GBT*.pdf
+docs/GB*28181*.pdf
+
+# 前端：依赖与构建中间产物（构建产物进 src/main/resources/static，需要入库）
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# 本机 frp 启动脚本（含本地绝对路径，不入库）
+frp.bat
+
+# ============ 本地敏感配置（严禁入库） ============
+# 数据库口令、密钥等一律走环境变量（GB_DB_PASSWORD / GB_DB_URL ...），
+# 本地覆盖写进下面这些文件，它们已在 .gitignore 中。
+# 模板见 src/main/resources/application.example.yml
+.env
+.env.*
+!.env.example
+src/main/resources/application-local.yml
+src/main/resources/application-local.yaml
+src/main/resources/application-*.local.yml
+src/main/resources/application-*.local.yaml
+
+# Playwright 排障脚本（本地临时目录，不入库）
+.tmp-*/
+
+# ============ 本地临时草稿（严禁入库） ============
+# 提交信息草稿（.cm3~.cm7、.commitmsg、.commitmsg2 等）曾被 git add -A 误带进
+# 仓库根目录。写提交信息请落到仓库外的临时路径（$env:TEMP），不要放在工作区：
+#   PowerShell 的 --amend、git status 都会被这些文件干扰。
+/.cm*
+/.commitmsg*
+
+# AI 工具配置（skill 包，随工具版本变化，不是项目代码）
+.agents/
+
+# ============ 第三方厂商 SDK（严禁入库） ============
+# 大华 NetSDK 的 Java 源码 + 原生库（libdhnetsdk.so / *.dll）受厂商许可约束，
+# 不允许随公开仓库分发。本仓库是公开的，因此整个 sdk/ 目录一律不入库。
+#
+# 【2026-10 起 SDK 已迁到 sdk-dahua 仓库】本仓库不再存放 SDK：
+#   原生库 → sdk-dahua/lib/<platform>/（按 profile 打进 sdk-dahua 的 jar）
+#   打包说明 → sdk-dahua/docs/原生库打包.md
+# 本规则保留是为了拦住历史残留（旧的工作副本里可能还有 sdk/）。
+sdk/

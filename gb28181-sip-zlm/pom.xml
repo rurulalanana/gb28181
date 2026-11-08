@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.rurulalanana</groupId>
+    <artifactId>gb28181</artifactId>
+    <version>1.0.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>gb28181-sip-zlm</artifactId>
+  <version>1.0.11</version>
+  <packaging>jar</packaging>
+
+  <name>gb28181-sip-zlm</name>
+  <description>
+    GB28181 流媒体服务：基于 gb28181-sip 信令模块 + ZLMediaKit（zlm4j）的收流集成。
+    信令（REGISTER/INVITE/BYE）由 gb28181-sip 处理，媒体（RTP/PS 接收、多协议输出）由 ZLMediaKit 处理。
+  </description>
+  <url>https://github.com/rurulalanana/gb28181/tree/main/gb28181-sip-zlm</url>
+
+  <licenses>
+    <license>
+      <name>The Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>rurulalanana</id>
+      <name>rurulalanana</name>
+      <url>https://github.com/rurulalanana</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/rurulalanana/gb28181/tree/main/gb28181-sip-zlm</url>
+    <connection>scm:git:https://github.com/rurulalanana/gb28181.git</connection>
+    <developerConnection>scm:git:https://github.com/rurulalanana/gb28181.git</developerConnection>
+    <tag>HEAD</tag>
+  </scm>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <!--
+      编译目标由父工程统一为 17（maven.compiler.release=17）。
+      早期这里是 release 8，为了让只跑 JDK 8 的对接方也能用这个协议库；
+      合并成单仓库后整个平台只交付一个 Spring Boot jar，不再独立发布，因此统一到 17。
+    -->
+    <sip.module.version>1.0.14</sip.module.version>
+    <!--
+      1.13.0 而非 1.12.0：内嵌的 ZLM 内核从 ac64e33(2026-07-24) 换到
+      1026839(2026-09-22)，差两个月。
+
+      升级原因是一个致命崩溃：流异常断开（设备拔线 / SSRC 变化）时
+      ZLM 在析构 MultiMediaSourceMuxer 的过程中抛
+      mediakit::MediaSourceEvent::NotImplemented
+      （RtmpMediaSourceMuxer::getOwnerPoller not implemented）。
+      C++ 析构函数默认 noexcept，异常逃逸即 std::terminate() →
+      SIGABRT，整个 JVM 被 abort（实测 29 次 core dumped）。
+      这是原生库的 bug，Java 侧无法捕获或兜住。
+
+      升级后若仍复现，说明该路径未修，需回退到第 2/3 层防御
+      （缩短分片 + 崩溃后清理孤儿文件，见 record-max-second 配置）。
+    -->
+    <zlm4j.version>1.13.0</zlm4j.version>
+    <slf4j.version>1.7.36</slf4j.version>
+    <commons.lang3.version>3.12.0</commons.lang3.version>
+    <junit.version>4.13.2</junit.version>
+  </properties>
+
+  <dependencies>
+    <!-- GB28181 SIP 信令模块（协议层，不含流媒体） -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>gb28181-sip</artifactId>
+      <version>${sip.module.version}</version>
+    </dependency>
+
+    <!-- ZLMediaKit C API 的 Java 封装（JNA），jar 内自带全平台原生库 -->
+    <dependency>
+      <groupId>com.aizuda</groupId>
+      <artifactId>zlm4j</artifactId>
+      <version>${zlm4j.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+
+    <!-- 字符串判空：本模块字节码目标 Java 8，不能用 String#isBlank（Java 11 才有） -->
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>${commons.lang3.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <version>1.18.30</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <!-- release 会同时校验语法级别与平台 API：用了商 JDK 17 不存在的 API
+               直接编译失败，避开「本地能过、目标跑不起来」 -->
+          <release>${java.version}</release>
+          <encoding>UTF-8</encoding>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+              <version>1.18.30</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>2.22.2</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.2.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <source>${java.version}</source>
+          <encoding>UTF-8</encoding>
+          <docencoding>UTF-8</docencoding>
+          <charset>UTF-8</charset>
+          <doclint>none</doclint>
+          <failOnError>false</failOnError>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <!-- 发布到 Maven Central：mvn clean deploy -Pcentral
+       需 ~/.m2/settings.xml 配置 central 凭据 + GPG 签名密钥 -->
+  <profiles>
+    <profile>
+      <id>central</id>
+      <distributionManagement>
+        <repository>
+          <id>central</id>
+          <name>Maven Central</name>
+          <url>https://central.sonatype.com/api/v1/publisher</url>
+        </repository>
+      </distributionManagement>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.8</version>
+            <configuration>
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>false</autoPublish>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.rurulalanana</groupId>
+    <artifactId>gb28181</artifactId>
+    <version>1.0.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>device-access</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>device-access</name>
+  <description>
+    设备接入契约（SPI）：与厂商无关的接口定义，不含任何实现。
+
+    为什么单独成模块：sdk-dahua / sdk-hikvision / sdk-uniview 都要实现同一套契约。
+    契约若住在某一家厂商的模块里，其它厂商就得依赖它 —— 语义上说不通，
+    接第三家时依赖链还会越拉越长。本模块零第三方依赖，谁都能依赖。
+
+    包名 io.github.rurulalanana.deviceaccess 不随模块名变：
+    它描述的是「设备接入」这件事，不是某一家厂商。
+  </description>
+  <url>https://github.com/rurulalanana/gb28181/tree/main/device-access</url>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.plugin.version>3.11.0</maven.compiler.plugin.version>
+    <!-- 不要升到 3.4.x：它依赖 plexus-archiver 的新版 API，
+         与本机 Maven 3.6.3 的 ClassRealm 不兼容。 -->
+    <maven.jar.plugin.version>3.3.0</maven.jar.plugin.version>
+    <maven.surefire.plugin.version>3.2.5</maven.surefire.plugin.version>
+  </properties>
+
+  <dependencies>
+    <!-- 契约只描述语义：没有 Spring、没有 JNA、没有日志框架。 -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${maven.compiler.plugin.version}</version>
+        <configuration>
+          <release>${java.version}</release>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>${maven.jar.plugin.version}</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${maven.surefire.plugin.version}</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

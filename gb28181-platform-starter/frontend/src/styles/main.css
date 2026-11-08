@@ -1,0 +1,1577 @@
+/* =============================================================
+   GB28181 平台 · 设计系统
+   -------------------------------------------------------------
+   视觉基调：值班控制台（duty console）——配色与质感是自己的，功能布局参考成熟国标平台。
+   - 深色侧栏 + 冷白内容区，层次靠**发丝分隔线**而不是卡片阴影；
+   - 单一强调色（蓝）只表示「可交互/当前」；状态色只表示状态；
+   - 编码/端口/时间等数据一律等宽 + tabular-nums，成列对齐；
+   - 密度优先：运维要在一屏里看完全部在线设备。
+
+   所有页面只使用本文件定义的 token，不写死颜色/间距。
+   ============================================================= */
+
+:root {
+  /* ---------- 强调色（链接/图表/焦点） ---------- */
+  /* 对齐 RuoYi / Element Plus 默认蓝（#409EFF）与其深浅梯度 */
+  --brand-50: #ecf5ff;
+  --brand-100: #d9ecff;
+  --brand-200: #c6e2ff;
+  --brand-300: #a0cfff;
+  --brand-400: #79bbff;
+  --brand-500: #409eff;
+  --brand-600: #337ecc;
+  --brand-700: #2b6cb0;
+  --brand-800: #235a8f;
+  --brand-900: #1d4b78;
+
+  /* ---------- 状态色（只表示状态，不参与排版） ---------- */
+  --online-500: #17914f;
+  --online-50: #e7f5ed;
+  --warning-500: #c47a00;
+  --warning-50: #fdf3e0;
+  --danger-500: #c8323f;
+  --danger-50: #fbeaec;
+  --info-500: #6b7785;
+  --info-50: #f2f4f7;
+
+  /* ---------- 中性色（冷灰，避免纯黑纯白） ---------- */
+  --ink-900: #0e1621;
+  --ink-800: #1b2531;
+  --ink-700: #2b3745;
+  --ink-600: #45525f;
+  /*
+   * 400/500 两档按 WCAG AA 收紧过：
+   * 原来 400 (#8c99a7) 在白底只有 2.9:1、在 ink-50 底上 2.6:1，
+   * 而它正是 `--text-tertiary`，全站 40 处 12px 说明文字都在用。
+   * 现在 400 = 5.05:1（白）/ 4.59:1（ink-50），500 = 6.9:1，灰阶顺序不变。
+   */
+  --ink-500: #4f5b68;
+  --ink-400: #64707d;
+  --ink-300: #b9c2cd;
+  --ink-200: #d8dee6;
+  --ink-100: #e7ebf0;
+  --ink-50: #f2f4f8;
+  --white: #ffffff;
+
+  /* ---------- 语义别名（业务代码用这些） ---------- */
+  --bg-app: #f5f7fa;
+  --bg-surface: var(--white);
+  --bg-sunken: #f7f8fb;
+  --bg-sidebar: #1f2d3d;
+  --bg-sidebar-hover: rgba(255, 255, 255, 0.08);
+  --bg-sidebar-active: rgba(64, 158, 255, 0.22);
+  --accent: var(--brand-500);
+  --accent-ink: var(--brand-600);
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-500);
+  --text-tertiary: var(--ink-400);
+  --text-inverse: #ffffff;
+
+  --line: #e5e7eb;          /* 常规发丝线（RuoYi 同色） */
+  --line-soft: #f0f2f5;     /* 更浅的次级分隔 */
+  --border-color: var(--line);
+  --border-strong: var(--ink-300);
+
+  /* ---------- 间距（4 的倍数） ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /*
+    ---------- 字号刻度 ----------
+    只保留 5 档。早先全站混用 11 / 11.5 / 12 / 12.5 / 13 / 13.5 / 14px，
+    同一屏出现七八种字号，看着「不伦不类」。现在按语义收敛：
+      fs-xs   12px  辅助说明、次要标签
+      fs-sm   13px  表格正文、控件
+      fs-md   14px  表格表头、导航、按钮、输入框
+      fs-lg   16px  卡片小标题
+      fs-xl   18px  页面标题
+  */
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+
+  /* ---------- 圆角：对齐 RuoYi 的 14px 基准，对外壳/卡片用大圆角 ---------- */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-panel: 14px;
+  --r-full: 999px;
+
+  /* ---------- 阴影：只留给浮层（弹窗/下拉），平面元素一律发丝线 ---------- */
+  --sh-xs: none;
+  --sh-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-md: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --sh-lg: 0 14px 36px rgba(15, 23, 42, 0.1);
+  --sh-panel: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-focus: 0 0 0 3px rgba(64, 158, 255, 0.18);
+
+  /* ---------- 尺寸与节奏 ---------- */
+  --sidebar-w: 216px;
+  --sidebar-w-collapsed: 60px;
+  --header-h: 52px;
+  --control-h: 32px;        /* 输入/按钮统一高度 */
+  --row-h: 44px;            /* 表格行高：10 行正好铺满一屏工作区 */
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono',
+    'PingFang SC', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  /* ---------- Element Plus 变量映射 ---------- */
+  --el-color-primary: var(--brand-500);
+  --el-color-primary-light-3: var(--brand-400);
+  --el-color-primary-light-5: var(--brand-300);
+  --el-color-primary-light-7: var(--brand-200);
+  --el-color-primary-light-8: var(--brand-100);
+  --el-color-primary-light-9: var(--brand-50);
+  --el-color-primary-dark-2: var(--brand-600);
+
+  --el-color-success: var(--online-500);
+  --el-color-warning: var(--warning-500);
+  --el-color-danger: var(--danger-500);
+  --el-color-error: var(--danger-500);
+  --el-color-info: var(--info-500);
+
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--ink-600);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: var(--text-tertiary);
+
+  --el-border-color: var(--line);
+  --el-border-color-light: var(--line);
+  --el-border-color-lighter: var(--line-soft);
+  --el-border-color-extra-light: var(--line-soft);
+  --el-fill-color-blank: var(--white);
+  --el-fill-color-light: var(--ink-50);
+  --el-fill-color-lighter: var(--bg-sunken);
+
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-font-size-base: 14px;
+  --el-box-shadow-light: var(--sh-md);
+  --el-box-shadow: var(--sh-md);
+}
+
+/* ==================== 基础 ==================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 数据类文本：编码、IP、端口、时间、SSRC —— 等宽 + 等宽数字，成列对齐 */
+.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.1px;
+  /* 编码/IP 这类文本必须单行：换行会撑高表格行，行高一变整张表就跟着抖 */
+  white-space: nowrap;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: var(--brand-100);
+  color: var(--brand-800);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand-400);
+  outline-offset: 1px;
+}
+
+/*
+ * 尊重系统「减少动态效果」设置。
+ * 全站过渡/动画统一降级，避免前庭敏感用户在页面切换、侧栏收缩时不适。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 细滚动条：默认滚动条会把控制台版面割得很碎 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ink-300);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-400);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
+}
+
+/* ==================== 表格固定列阴影 ==================== */
+
+/*
+ * 消除「表格明明放得下，却多出一条横向滚动条」的问题。
+ *
+ * <p>Element Plus 给固定右列画阴影用的是伪元素：
+ * <pre>
+ * .el-table td.el-table-fixed-column--right::after {
+ *   content: ""; position: absolute; right: 0; width: 6px;
+ *   transform: translate(100%);   ← 整条挪到单元格外侧
+ * }
+ * </pre>
+ * 这 6px 伸到表格右边界之外，浏览器把它算进「可滚动溢出」，
+ * 于是 scrollWidth 比 clientWidth 多 6px —— 表格内容明明一列不差，
+ * 却冒出一条只能横移 6px、什么也看不到的横向滚动条。
+ * 设备管理 / 通道管理 / 云端录像列表都有这个现象（与视口宽度无关，
+ * 恒定多 6px）。
+ *
+ * <p>修法：把阴影挪回单元格内侧（transform 取消平移）。
+ * 阴影仍是「固定列右缘外侧一条渐变」，只是往左挪了 6px，
+ * 视觉几乎无差别，但不再撑出滚动溢出。
+ *
+ * <p>左列的 ::before 同理（10px，left:-10px），它向左溢出，
+ * 浏览器不会为左侧溢出生成滚动条，保留原样即可。
+ */
+.el-table th.el-table-fixed-column--right::after,
+.el-table td.el-table-fixed-column--right::after {
+  transform: none !important;
+}
+
+/* ==================== 页面骨架 ==================== */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/*
+  列表页通用：铺满内容区高度。
+  表格页（设备/通道/报警等）加 is-fill 后：
+    - 卡片吃掉剩余高度，分页条始终贴在卡片底部
+    - 表格自身高度按内容自适应：数据少时不留大片空白，
+      数据多时超出可用高度才在表格内部滚动（页面不出现外层滚动条）
+*/
+.page.is-fill {
+  /*
+   * 用 flex:1 而非 height:100%。
+   * .content 是 flex 列容器，除页面外还装着 .app-footer；
+   * height:100% 取的是容器全高，会把页脚顶出可视区（实测溢出 49px），
+   * flex:1 拿的才是「扣掉页脚之后的剩余高度」。
+   */
+  flex: 1;
+  min-height: 0;
+}
+
+.page.is-fill > * {
+  min-height: 0;
+}
+
+/* 承载表格的卡片：撑满高度，内部按「表格 + 分页条」两段分配 */
+.page.is-fill > .el-card {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/*
+  卡片主体：表格吃掉除分页条外的全部高度，分页条固定贴在卡片底部。
+  卡片本身已被上面规则拉满，表格若只按内容高度（fit-content），
+  页面下方就会剩一大片空白 —— 表格区必须跟着卡片一起撑满。
+*/
+.page.is-fill > .el-card > .el-card__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/*
+  表格撑满卡片剩余高度。
+  height:0 是关键 —— Element 的 .el-table 默认 height:fit-content，
+  在 flex 列容器里会被内容顶开；height:0 + flex:1 才能让 flex-basis 归零、
+  纯粹按剩余空间分配，表格才会真正吃满可用高度。
+  内部结构（inner-wrapper 是 height:100% 的 flex 列，body-wrapper 是 flex:1）
+  会自动把多出来的高度分给表体，表头仍固定在顶部。
+*/
+.page.is-fill > .el-card > .el-card__body > .el-table {
+  flex: 1;
+  min-height: 0;
+  height: 0;
+}
+
+/* 表格内部滚动时，表头保持吸顶 */
+.page.is-fill .el-table__header-wrapper {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg-surface);
+}
+
+/* ==================== 面板（替代 Element 卡片外观） ==================== */
+
+.el-card {
+  /* RuoYi 面板：14px 圆角 + 1px 描边 + hover 轻微抬升 */
+  border-radius: var(--r-panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--sh-panel);
+  background: var(--bg-surface);
+  overflow: hidden;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.el-card:hover {
+  box-shadow: var(--sh-md);
+  border-color: rgba(64, 158, 255, 0.2);
+}
+
+/* 参考站的 box：标题居中加粗、无分隔线（用于概览等图表/读数区） */
+.el-card.box-centered > .el-card__header {
+  justify-content: center;
+  border-bottom: none;
+  height: 44px;
+}
+
+.el-card.box-centered > .el-card__header .card-title {
+  justify-content: center;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.el-card.is-always-shadow,
+.el-card.is-hover-shadow:hover {
+  box-shadow: none;
+}
+
+.el-card__header {
+  padding: 0 var(--sp-4);
+  height: 42px;
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.el-card__body {
+  padding: var(--sp-4);
+}
+
+.el-card__body.is-compact {
+  padding: var(--sp-3);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: 24px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+
+/* 卡片标题的图标只做定位，不做装饰色 */
+.card-title .el-icon {
+  color: var(--text-tertiary);
+  font-size: var(--fs-md);
+}
+
+/* 标题前后加一条延伸线，让卡片头部有"仪表分区"感 */
+.card-header .card-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* 计数小标（如"进行中的直播流 2"）：小号等宽，不做彩色药丸 */
+.count-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: var(--ink-100);
+  color: var(--ink-600);
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+/* ==================== 指标读数（KPI） ==================== */
+
+/* 一排读数单元，中间用发丝线分隔——比四张彩色图标卡安静得多 */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.kpi {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--sp-4) var(--sp-5);
+  min-width: 0;
+}
+
+/* 竖向分隔线（末列不画） */
+.kpi + .kpi {
+  box-shadow: inset 1px 0 0 var(--line);
+}
+
+.kpi-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+.kpi-label .el-icon {
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
+.kpi-value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--mono);
+  font-size: 27px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -1px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-unit {
+  font-family: var(--sans);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+}
+
+.kpi-foot {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi-foot .up {
+  color: var(--online-500);
+}
+
+.kpi-foot .off {
+  color: var(--text-tertiary);
+}
+
+/* ==================== 占比条（细线 + 刻度感） ==================== */
+
+.rate-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-5) var(--sp-6);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+.rate-block {
+  min-width: 0;
+}
+
+.rate-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: 7px;
+}
+
+.rate-label {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+.rate-value {
+  font-family: var(--mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 4px 直角轨道：比圆角胶囊更像仪表 */
+.rate-track {
+  position: relative;
+  height: 4px;
+  background: var(--ink-100);
+  overflow: hidden;
+}
+
+.rate-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.rate-fill.is-full { background: var(--online-500); }
+.rate-fill.is-low { background: var(--warning-500); }
+
+/* ==================== 快捷入口（工具条，而不是彩色磁贴） ==================== */
+
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: var(--sp-3);
+}
+
+.quick-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 11px var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.quick-card:hover {
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+
+.quick-card:active {
+  background: var(--brand-100);
+}
+
+/* 图标：线性、单色，hover 才着强调色——不再用渐变方块 */
+.quick-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-lg);
+  color: var(--ink-500);
+  background: var(--ink-50);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.quick-card:hover .quick-icon {
+  color: var(--accent);
+  border-color: var(--brand-200);
+  background: var(--white);
+}
+
+.quick-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.quick-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.quick-desc {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-arrow {
+  color: var(--ink-300);
+  font-size: var(--fs-sm);
+  opacity: 0;
+  transform: translateX(-3px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.quick-card:hover .quick-arrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* ==================== 键值读数（服务器信息等） ==================== */
+
+.kv {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.kv-row:last-child {
+  border-bottom: none;
+}
+
+.kv-row dt {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.kv-row dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--text-primary);
+  text-align: right;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==================== 表格 ==================== */
+
+/*
+  字号与行高对齐 LiveGBS：表头 14px、正文 13.5px、行高 44px。
+  早先表头只有 11.5px、行高 36px，一屏只能放下十几行且看着局促；
+  10 行 × 44px 正好铺满一屏的工作区，信息密度与可读性平衡最好。
+*/
+/* 双类选择器：Element 自带的 .el-table 变量声明权重相同且后加载，
+   单类写法会被它覆盖成默认白底，这里必须提高一级。 */
+.el-table.el-table {
+  font-size: var(--fs-md);
+  --el-table-border-color: var(--line-soft);
+  /*
+    表头背景不能是 transparent：Element 会用这个变量给固定列表头填色
+    （.is-scrolling-none th.el-table-fixed-column--left 等），
+    设成透明时横向滚动就能透过标题看到下层内容。
+  */
+  --el-table-header-bg-color: #f8fafc;
+  --el-table-header-text-color: #475569;
+  --el-table-row-hover-bg-color: #f5f7fa;
+  --el-table-border-color: #ebeef5;
+  --el-table-text-color: var(--ink-800);
+}
+
+/* 表头：浅灰底 + 一条底线（对齐 RuoYi 的 #f8fafc） */
+.el-table th.el-table__cell {
+  background: var(--el-table-header-bg-color) !important;
+  height: 44px;
+  padding: 0;
+  font-weight: 600;
+  font-size: var(--fs-md);
+  letter-spacing: 0.01em;
+  color: var(--ink-600);
+  border-bottom: 1px solid var(--line) !important;
+}
+.el-table th.el-table__cell .cell {
+  padding: 0 var(--sp-3);
+  /* 表头不换行：「通道数」这类标题在窄列里换行会把表头撑成两行 */
+  white-space: nowrap;
+}
+
+.el-table td.el-table__cell {
+  height: var(--row-h);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.el-table .cell {
+  padding: 0 var(--sp-3);
+  line-height: 1.5;
+}
+
+.el-table__inner-wrapper::before {
+  display: none;
+}
+
+/* 表格里的输入框/开关：压到行高以内，避免表格看起来像表单 */
+.el-table .el-input__wrapper,
+.el-table .el-select__wrapper {
+  min-height: 30px;
+}
+
+.el-table .el-input__inner,
+.el-table .el-select__placeholder {
+  font-size: var(--fs-sm);
+}
+
+.el-table .el-button.is-link {
+  font-size: var(--fs-sm);
+}
+
+/*
+  固定列（左右）必须不透明，否则横向滚动时下层单元格会透出来，
+  表现为「透过标题看到盖住的标题」。
+
+  Element 对固定列表头用的是 `background: inherit`（继承 header-wrapper），
+  而 header-wrapper 是透明的，所以固定列表头实际是透明的。
+  它的选择器权重又高于普通规则，这里直接用 !important 压过去 ——
+  固定列必须不透明是硬性要求，不值得为权重纠缠。
+*/
+.el-table.el-table td.el-table-fixed-column--left,
+.el-table.el-table td.el-table-fixed-column--right {
+  z-index: 3;
+  background-color: var(--bg-surface) !important;
+}
+
+.el-table.el-table th.el-table-fixed-column--left,
+.el-table.el-table th.el-table-fixed-column--right,
+.el-table.el-table__header-wrapper tr th.el-table-fixed-column--left,
+.el-table.el-table__header-wrapper tr th.el-table-fixed-column--right {
+  z-index: 4;
+  background-color: var(--el-table-header-bg-color) !important;
+}
+
+/* 斑马纹行里的固定列要跟着变深，否则固定列会浮在条纹上。
+   颜色取 Element 的实际条纹色（--el-fill-color-lighter = #fafafa），
+   否则固定列会比所在行浅一档，一眼就能看出断层。 */
+.el-table.el-table .el-table__row--striped td.el-table-fixed-column--left,
+.el-table.el-table .el-table__row--striped td.el-table-fixed-column--right {
+  background-color: var(--el-fill-color-lighter) !important;
+}
+
+/* 固定列的阴影边：滚动时提示「下面还有内容」，比纯色块更易读 */
+.el-table th.el-table-fixed-column--right::after,
+.el-table td.el-table-fixed-column--right::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: -1px;
+  width: 6px;
+  transform: translateX(100%);
+  pointer-events: none;
+  background: linear-gradient(to left, rgba(14, 22, 33, 0.08), transparent);
+}
+
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.empty-cell {
+  text-align: center;
+  color: var(--text-tertiary);
+  padding: var(--sp-10) 0 !important;
+}
+
+/* 表格行内操作（图标按钮）：默认灰，hover 才上色 */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.row-actions .el-button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--ink-500);
+  background: transparent;
+}
+
+.row-actions .el-button:hover {
+  color: var(--accent-ink);
+  background: var(--brand-50);
+}
+
+.row-actions .el-button.is-danger,
+.row-actions .el-button--danger:hover {
+  color: var(--danger-500);
+}
+
+.row-actions .el-button--danger:hover {
+  background: var(--danger-50);
+}
+
+.row-actions .el-button.is-link,
+.row-actions .el-button.is-text {
+  width: auto;
+  height: auto;
+  padding: 0 4px;
+}
+
+
+/* ==================== 筛选栏（贴在内容上的一条工具带，不做"卡片套卡片"） ==================== */
+
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  /* RuoYi 的操作条：独立白色圆角面板，与下面内容面板同宽同圆角 */
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--sh-panel);
+  margin-bottom: var(--sp-3);
+}
+
+.filter-bar .el-select,
+.filter-bar .el-input {
+  width: auto;
+}
+
+.filter-bar .el-input__wrapper,
+.filter-bar .el-select__wrapper {
+  min-width: 0;
+}
+
+/* 筛选栏里的说明文字推到最右，作为"操作提示"而非表单标签 */
+.filter-bar-tip {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+.filter-bar-spacer {
+  flex: 1;
+}
+
+.search-form .el-form-item {
+  margin-bottom: var(--sp-3);
+  margin-right: var(--sp-2);
+}
+
+.search-form .el-form-item__label {
+  color: var(--ink-600);
+  font-weight: 500;
+}
+
+/* ==================== 状态标记（点 + 文字，不做彩色药丸） ==================== */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--ink-600);
+}
+
+.badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.badge.is-online { color: var(--online-500); }
+.badge.is-offline { color: var(--ink-400); }
+.badge.is-alarm { color: var(--danger-500); }
+.badge.is-warning { color: var(--warning-500); }
+.badge.is-brand { color: var(--accent-ink); }
+
+/* 需要"填充小标"的地方（如计数、类型）显式加 is-plain */
+.badge.is-plain {
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--ink-50);
+  border: 1px solid var(--line);
+  color: var(--ink-600);
+  font-size: var(--fs-xs);
+}
+
+.badge.is-plain::before {
+  display: none;
+}
+
+.badge.is-plain.is-online { background: var(--online-50); border-color: transparent; color: var(--online-500); }
+.badge.is-plain.is-alarm { background: var(--danger-50); border-color: transparent; color: var(--danger-500); }
+.badge.is-plain.is-warning { background: var(--warning-50); border-color: transparent; color: var(--warning-500); }
+.badge.is-plain.is-brand { background: var(--brand-50); border-color: transparent; color: var(--accent-ink); }
+
+/* 实时状态呼吸灯 */
+.pulse-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger-500);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
+
+/* ==================== 视频容器 ==================== */
+
+.video-box {
+  background: #070a10;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  position: relative;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/*
+ * 播放器挂载点。
+ *
+ * 播放器（LivePlayer）自行在容器内创建 video 元素并管理尺寸，
+ * 因此这里只负责撑满 .video-box，**不要**给内部 video 加 width/height ——
+ * 外部覆盖会导致画面缩放基准错乱。
+ */
+.video-container {
+  position: absolute;
+  inset: 0;
+}
+
+/*
+ * 控制栏里的自定义文字按钮（LivePlayerEngine 的 controlButtons）。
+ *
+ * <h3>为什么要单独写样式</h3>
+ * video.js 的 `.vjs-button` 是按「图标按钮」设计的：固定 4em 宽、
+ * 用 `:before` 画字体图标。我们的按钮只有一段文字、没有图标，
+ * 直接用默认样式会有三个问题：
+ *   1. 宽度写死 4em —— "HTTP-FLV" 这种长文本会被挤成两行或溢出；
+ *   2. 高度按图标行高算，文字标题不居中；
+ *   3. `:before` 是空的，但仍占位，导致文字偏右。
+ *
+ * <p>所以：宽度 auto（按文字自适应）+ 左右内边距、去掉 `:before`、
+ * 用 flex 居中。字号 12px 比控制栏其它图标小一号 —— 它是文字，
+ * 与 14px 的图标并排时视觉重量才接近。
+ */
+.vjs-control-bar .lp-ctrl-btn {
+  width: auto;
+  min-width: 0;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  /* 与相邻图标按钮同色系（video.js 用 currentColor 继承 .vjs-control 的白色） */
+  color: inherit;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.vjs-control-bar .lp-ctrl-btn:hover {
+  opacity: 1;
+}
+
+/* 去掉图标按钮的伪元素占位 */
+.vjs-control-bar .lp-ctrl-btn:before {
+  content: none;
+}
+
+.vjs-control-bar .lp-ctrl-btn .lp-ctrl-text {
+  /* 文字按钮不需要额外位移，居中即可 */
+  display: inline-block;
+  line-height: 1;
+}
+
+/* ==================== 通用工具类 ==================== */
+
+.text-muted { color: var(--text-secondary); }
+.text-dim { color: var(--text-tertiary); }
+.text-brand { color: var(--accent-ink); }
+.text-success { color: var(--online-500); }
+.text-danger { color: var(--danger-500); }
+.text-warning { color: var(--warning-500); }
+
+.strong { font-weight: 600; }
+.nowrap { white-space: nowrap; }
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-xs { font-size: var(--fs-xs); }
+.text-sm { font-size: var(--fs-xs); }
+
+.mt-1 { margin-top: var(--sp-1); }
+.mt-2 { margin-top: var(--sp-2); }
+.mt-3 { margin-top: var(--sp-3); }
+.mt-4 { margin-top: var(--sp-4); }
+.mt-6 { margin-top: var(--sp-6); }
+.mb-1 { margin-bottom: var(--sp-1); }
+.mb-2 { margin-bottom: var(--sp-2); }
+.mb-3 { margin-bottom: var(--sp-3); }
+.mb-4 { margin-bottom: var(--sp-4); }
+
+.flex { display: flex; }
+.flex-center { display: flex; align-items: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.flex-wrap { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.gap-1 { gap: var(--sp-1); }
+.gap-2 { gap: var(--sp-2); }
+.gap-3 { gap: var(--sp-3); }
+.gap-4 { gap: var(--sp-4); }
+.flex-1 { flex: 1; min-width: 0; }
+.grow { flex: 1; }
+
+/* ==================== Element Plus 细节覆写 ==================== */
+
+.el-button {
+  font-weight: 500;
+  border-radius: var(--r-sm);
+  height: var(--control-h);
+  padding: 0 14px;
+  font-size: var(--fs-md);
+  box-shadow: none;
+}
+
+.el-button--small {
+  height: 30px;
+  padding: 0 11px;
+  font-size: var(--fs-sm);
+}
+
+.el-button--large {
+  height: 36px;
+}
+
+/* 主按钮：实色，不做渐变和投影 */
+.el-button--primary {
+  box-shadow: none;
+}
+
+/* 默认按钮：白底发丝描边（不是 Element 的灰底） */
+.el-button--default:not(.is-link):not(.is-text) {
+  background: var(--white);
+  border-color: var(--line);
+  color: var(--ink-700);
+}
+
+.el-button--default:not(.is-link):not(.is-text):hover {
+  border-color: var(--brand-300);
+  color: var(--accent-ink);
+  background: var(--brand-50);
+}
+
+.el-button.is-link {
+  height: auto;
+  padding: 0 2px;
+  font-weight: 500;
+}
+
+.el-button.is-link.el-button--primary {
+  color: var(--accent-ink);
+}
+
+.el-button.is-link.el-button--primary:hover {
+  text-decoration: underline;
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: var(--r-md);
+  box-shadow: 0 0 0 1px var(--line) inset;
+  background: var(--white);
+  font-size: var(--fs-md);
+  transition: box-shadow 0.15s ease;
+}
+
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px var(--ink-300) inset;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--brand-500) inset, var(--sh-focus) !important;
+}
+
+.el-input__inner::placeholder {
+  color: var(--ink-400);
+}
+
+/* 开关：小一号、方正一点，与 30px 的控件高度协调 */
+.el-switch {
+  --el-switch-on-color: var(--online-500);
+  --el-switch-off-color: var(--ink-300);
+}
+
+.el-tag {
+  border-radius: var(--r-sm);
+  font-weight: 500;
+  border: 1px solid var(--line);
+  background: var(--white);
+  color: var(--ink-600);
+}
+
+.el-tag--primary { color: var(--accent-ink); border-color: var(--brand-200); background: var(--brand-50); }
+.el-tag--success { color: var(--online-500); border-color: transparent; background: var(--online-50); }
+.el-tag--warning { color: var(--warning-500); border-color: transparent; background: var(--warning-50); }
+.el-tag--danger { color: var(--danger-500); border-color: transparent; background: var(--danger-50); }
+.el-tag--info { color: var(--ink-600); border-color: transparent; background: var(--ink-50); }
+
+/*
+ * el-tag 的进入过渡会永久卡住，标签直接看不见 —— 必须兜底。
+ *
+ * Element Plus 的 el-tag 自带 <Transition name="el-zoom-in-center">，进场时先挂上
+ * `el-zoom-in-center-enter-from`（opacity: 0 + transform: scaleX(0)），
+ * 靠 Vue 在下一帧（requestAnimationFrame）把类名摘掉来放行。
+ * 但 rAF 在**后台标签页里会被浏览器暂停**：如果在后台标签里打开/刷新页面，
+ * 进场永远走不完，类名就一直留在元素上，标签既透明又宽度为 0。
+ * 实测报警列表 20 行的「级别」标签全部不可见，切到前台也不会自己恢复
+ * （类名已经错过了摘除时机）。代价是一个 300ms 的缩放装饰，换标签一定可见。
+ */
+.el-tag.el-zoom-in-center-enter-from,
+.el-tag.el-zoom-in-center-enter-active,
+.el-tag.el-zoom-in-center-leave-active {
+  opacity: 1;
+  transform: none;
+}
+
+.el-dialog {
+  border-radius: var(--r-xl);
+  border: 1px solid var(--line);
+  box-shadow: var(--sh-lg);
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: var(--sp-3) var(--sp-4);
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+
+.el-dialog__body {
+  padding: var(--sp-4);
+}
+
+.el-dialog__footer {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--line-soft);
+}
+
+.el-drawer__header {
+  margin-bottom: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+  font-size: var(--fs-md);
+  color: var(--text-primary);
+}
+
+.el-drawer__body {
+  padding: var(--sp-4);
+}
+
+.el-tabs__item {
+  font-weight: 500;
+  font-size: var(--fs-sm);
+}
+
+.el-tabs__nav-wrap::after {
+  background: var(--line);
+  height: 1px;
+}
+
+.el-pagination {
+  --el-pagination-font-size: var(--fs-md);
+  --el-pagination-button-height: 30px;
+  --el-pagination-button-width: 30px;
+  font-variant-numeric: tabular-nums;
+}
+
+.el-pagination .el-pager li,
+.el-pagination button {
+  border-radius: var(--r-sm);
+}
+
+.el-descriptions__label {
+  color: var(--text-secondary) !important;
+  font-weight: 500 !important;
+}
+
+.el-descriptions__cell {
+  padding: 8px 12px !important;
+}
+
+.el-descriptions__content {
+  font-variant-numeric: tabular-nums;
+}
+
+.el-empty__description p {
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+}
+
+.el-empty {
+  --el-empty-padding: var(--sp-8) 0;
+}
+
+.el-loading-mask {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.el-form-item__label {
+  color: var(--ink-600);
+  font-weight: 500;
+}
+
+.el-popper.is-light {
+  border: 1px solid var(--line);
+  box-shadow: var(--sh-md);
+}
+
+/*
+  说明型 tooltip（HelpTip 组件）。
+
+  必须写在全局样式里：tooltip 被 teleport 到 <body> 下，
+  组件内的 scoped 规则（.xxx[data-v-...]）匹配不到它。
+
+  限制宽度是关键 —— 默认 tooltip 是 nowrap 单行，
+  一句四十字的说明会拉成横跨整屏的一条，既难读也会超出视口。
+*/
+.el-popper.help-tip-popper {
+  max-width: 320px;
+  /* 用全局 --fs-sm：与正文同号，这是唯一的解释来源，不能再小一档 */
+  font-size: var(--fs-sm);
+  line-height: 1.75;
+  /* 覆盖 Element 的 nowrap，让长句按 max-width 换行 */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.el-message-box {
+  border-radius: var(--r-xl);
+  border: 1px solid var(--line);
+  padding: var(--sp-4);
+}
+
+.el-message-box__title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.el-notification,
+.el-message {
+  border-radius: var(--r-lg);
+}
+
+.el-tree {
+  --el-tree-node-hover-bg-color: var(--ink-50);
+  font-size: var(--fs-sm);
+  background: transparent;
+}
+
+.el-tree-node__content {
+  height: 30px;
+}
+
+.el-radio-button__inner {
+  border-color: var(--line);
+  font-weight: 500;
+}
+
+.el-segmented {
+  --el-segmented-item-selected-bg-color: var(--white);
+  --el-segmented-item-selected-color: var(--accent-ink);
+  --el-segmented-bg-color: var(--ink-50);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+}
+
+.el-dropdown-menu__item {
+  font-size: var(--fs-sm);
+}
+
+
+/* ==================== 顶栏 / 页签条 / 页脚（参考站骨架） ==================== */
+
+/* 顶栏右侧读数：小灰标签 + 等宽数值，形如 LiveGBS 的「接收 8.7 Mbps」 */
+.top-readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.top-readout .val {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.top-readout .val i {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+/* 页脚：居中灰字（参考站同款位置） */
+.app-footer {
+  flex-shrink: 0;
+  margin-top: var(--sp-4);
+  padding: 10px 0 4px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--ink-400);
+  border-top: 1px solid var(--line);
+}
+
+.app-footer .mono {
+  font-size: var(--fs-xs);
+}
+
+/* ==================== 环形读数（参考站「通道信息」的甜甜圈） ==================== */
+
+.gauge-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 48px;
+  padding: var(--sp-5) var(--sp-4);
+}
+
+.gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 108px;
+}
+
+.gauge-ring {
+  position: relative;
+  width: 108px;
+  height: 108px;
+}
+
+.gauge-ring svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.gauge-ring .track {
+  fill: none;
+  stroke: var(--line-soft);
+  stroke-width: 8;
+}
+
+.gauge-ring .fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 8;
+  stroke-linecap: butt;
+  transition: stroke-dashoffset 0.4s ease;
+}
+
+.gauge-ring .fill.is-low {
+  stroke: var(--warning-500);
+}
+
+.gauge-ring .fill.is-critical {
+  stroke: var(--danger-500);
+}
+
+.gauge-value {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--ink-800);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 读数下方的说明：在线数 / 总数（参考站同款两行） */
+.gauge-caption {
+  text-align: center;
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  color: var(--ink-600);
+}
+
+.gauge-caption b {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+/* ==================== 负载/分布小柱状（无图表库，纯 CSS） ==================== */
+
+.mini-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-4);
+  height: 168px;
+  padding: var(--sp-4) var(--sp-5) var(--sp-3);
+}
+
+.mini-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.mini-bar .bar {
+  width: 100%;
+  max-width: 54px;
+  background: var(--accent);
+  transition: height 0.3s ease;
+  min-height: 2px;
+}
+
+.mini-bar .bar.is-zero {
+  background: var(--line);
+}
+
+.mini-bar .bar-val {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-700);
+}
+
+.mini-bar .bar-label {
+  font-size: var(--fs-xs);
+  color: var(--ink-500);
+  white-space: nowrap;
+}
+
+/* 服务器信息 box 里的分组小标题 */
+.box-subtitle {
+  padding: 0 var(--sp-4) 6px;
+  font-size: var(--fs-xs);
+  color: var(--ink-400);
+}
+
+/* ==================== 响应式 ==================== */
+
+@media (max-width: 1200px) {
+  .kpi-grid {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .el-card__body {
+    padding: var(--sp-3);
+  }
+}
+
+/* 打印：去掉一切浮层装饰 */
+@media print {
+  .el-card,
+  .kpi-grid,
+  .quick-card {
+    box-shadow: none;
+  }
+}
