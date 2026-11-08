@@ -65,6 +65,9 @@ public class PlaybackController {
     /** 通道编码反查设备编码：SIP 寻址只认设备编码。 */
     private final DeviceService deviceService;
     private final DownloadService downloadService;
+
+    /** 下载是否用标准 9.9 的下载会话（{@code s=Download}）。默认关闭，原因见 {@code start} 里的说明。 */
+    private static final boolean DOWNLOAD_SESSION_ENABLED = false;
     /** 录像文件路径 → 签名静态 URL 的唯一出口。 */
     private final io.github.rurulalanana.starter.config.SpaWebConfiguration spaWebConfiguration;
 
@@ -211,7 +214,23 @@ public class PlaybackController {
         if (req.getSpeed() != null && req.getSpeed() > 1) {
             downloadSpeed = Math.max(downloadSpeed, req.getSpeed());
         }
-        GbStream stream = streamService.startPlayback(deviceId, channelId, item, downloadSpeed);
+        /*
+         * 下载会话（{@code s=Download}）默认<b>不启用</b>。
+         *
+         * <p>标准 9.9 与 WVP 都走 {@code s=Download + a=downloadspeed:N}，但实测本平台
+         * 对接的下级平台不执行倍速：同一次 12 秒采样里，{@code s=Playback} 的 PTS 跨度
+         * 10.00s、{@code s=Download + a=downloadspeed:4} 的 PTS 跨度 10.48s —— 都还是
+         * 1 倍速。而下载会话的代价很实在：设备回 {@code t=0 0 + a=filesize:...}，
+         * 按<b>整个文件</b>推，忽略请求区间。
+         *
+         * <p>所以这里保持 {@code s=Playback}（内容严格对应请求的时段）。
+         * 遇到真正支持下载倍速的设备，把 {@link #DOWNLOAD_SESSION_ENABLED} 打开即可，
+         * 媒体层的 {@code playback(..., asDownload)} 已备好。
+         */
+        boolean asDownload = DOWNLOAD_SESSION_ENABLED
+                && Boolean.TRUE.equals(req.getDownload()) && isWholeRecord(item);
+        GbStream stream = streamService.startPlayback(deviceId, channelId, item, downloadSpeed,
+                asDownload);
         // 必须按回放会话取地址：session(deviceId, channelId) 查的是直播键（无类型后缀），
         // 云端录像保活使通道长期有直播流，会返回直播地址（OSD 显示当下时间）。
         // 回放键是 <设备>/<通道>_playback，正是 GbStream#getStreamKey() 保存的值。
@@ -329,6 +348,44 @@ public class PlaybackController {
         streamService.mediaService().playbackControl(session.getDeviceId(), session.getCallId(),
                 cmd, seekSecond, rate);
         return ApiResponse.ok();
+    }
+
+    /**
+     * 请求的区间是否就是一条完整录像（容差 2 秒）。
+     *
+     * <p>有 {@code FilePath} 时按文件下载，天然是整段；否则拿缓存里的录像段
+     * 对比起止时间。设备不按请求区间停推，只有整段下载才不会「拿错内容」。
+     */
+    private static java.time.LocalDateTime toLocal(java.util.Date date) {
+        return date == null ? null
+                : java.time.LocalDateTime.ofInstant(date.toInstant(),
+                        java.time.ZoneId.systemDefault());
+    }
+
+    private boolean isWholeRecord(RecordItem item) {
+        if (item == null) {
+            return false;
+        }
+        if (item.getFilePath() != null && !item.getFilePath().isBlank()) {
+            return true;
+        }
+        if (item.getStartTime() == null || item.getEndTime() == null) {
+            return false;
+        }
+        long wantStart = item.getStartTime().getTime() / 1000;
+        long wantEnd = item.getEndTime().getTime() / 1000;
+        List<GbDeviceRecord> records = recordService.deviceRecords(item.getDeviceId(),
+                toLocal(item.getStartTime()), toLocal(item.getEndTime()), null);
+        for (GbDeviceRecord r : records) {
+            long rs = r.getStartTime() == null ? 0
+                    : r.getStartTime().atZone(java.time.ZoneId.systemDefault()).toEpochSecond();
+            long re = r.getEndTime() == null ? 0
+                    : r.getEndTime().atZone(java.time.ZoneId.systemDefault()).toEpochSecond();
+            if (Math.abs(rs - wantStart) <= 2 && Math.abs(re - wantEnd) <= 2) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ==================== 录像下载 ====================

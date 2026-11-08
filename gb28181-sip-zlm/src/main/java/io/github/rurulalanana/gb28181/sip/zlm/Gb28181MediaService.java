@@ -497,6 +497,17 @@ public class Gb28181MediaService implements SipCallback {
      */
     public RtpSession playback(String deviceId, String channelId, RecordItem item,
                                int downloadSpeed) {
+        return playback(deviceId, channelId, item, downloadSpeed, false);
+    }
+
+    /**
+     * 平台主动历史回放 / 下载，可指定倍速与是否用下载会话。
+     *
+     * @param asDownload {@code true} 时 SDP 用 {@code s=Download}（9.9 文件下载语义），
+     *                   倍速才会被设备执行；{@code false} 为普通回放（{@code s=Playback}）
+     */
+    public RtpSession playback(String deviceId, String channelId, RecordItem item,
+                               int downloadSpeed, boolean asDownload) {
         String channel = StringUtils.isBlank(channelId) ? deviceId : channelId;
         /*
          * 会话身份（mediaUri）：有 FilePath 用它，没有则用「起/止时间」。
@@ -521,12 +532,13 @@ public class Gb28181MediaService implements SipCallback {
         RtpSession session = sessionManager.open(channel, deviceId, null, 0, null,
                 MediaType.PLAYBACK, mediaUri);
         try {
-            SdpMessage offer = buildPlaybackSdp(session, item, downloadSpeed);
+            SdpMessage offer = buildPlaybackSdp(session, item, downloadSpeed, asDownload);
             // 同实时点播：Request-URI / To / Subject 填通道编码
             String callId = client().invitePlayback(deviceId, channel, offer);
             sessionManager.bindCallId(session, callId);
-            log.info("已发起回放 INVITE: {} mediaUri={} 倍速={} callId={} playUrls={}",
-                    session, mediaUri, downloadSpeed, callId, mediaServer.playUrls(session));
+            log.info("已发起回放 INVITE: {} mediaUri={} 倍速={} 下载会话={} callId={} playUrls={}",
+                    session, mediaUri, downloadSpeed, asDownload, callId,
+                    mediaServer.playUrls(session));
             return session;
         } catch (RuntimeException e) {
             // 同实时点播：INVITE 失败必须回滚，否则留下永不 ONLINE 的僵尸会话
@@ -1540,6 +1552,21 @@ public class Gb28181MediaService implements SipCallback {
      *                      表示<b>不下发</b> {@code a=downloadspeed}，即按实时速度推流
      */
     SdpMessage buildPlaybackSdp(RtpSession session, RecordItem item, int downloadSpeed) {
+        return buildPlaybackSdp(session, item, downloadSpeed, false);
+    }
+
+    /**
+     * 构造回放 / 下载 INVITE 的 SDP。
+     *
+     * @param downloadSpeed 请求设备按几倍速推送；{@link #SPEED_UNLIMITED}（1）表示不下发倍速属性
+     * @param asDownload    {@code true} 时 {@code s=Download}（标准 9.9 的文件下载会话）。
+     *                      <b>倍速只有下载会话才普遍生效</b>：实测同一个设备对
+     *                      {@code s=Playback + a=downloadspeed} 完全不理，换成
+     *                      {@code s=Download} 才按倍速推流 —— WVP 的
+     *                      {@code SIPCommander} 也是直接发 {@code s=Download}。
+     */
+    SdpMessage buildPlaybackSdp(RtpSession session, RecordItem item, int downloadSpeed,
+                                boolean asDownload) {
         long start = RecordItem.epochSecond(item.getStartTime());
         long end = RecordItem.epochSecond(item.getEndTime());
         // t= 为「会话活跃时间」：结束时间未知时退化为起点（标准允许）
@@ -1576,7 +1603,7 @@ public class Gb28181MediaService implements SipCallback {
                  * </ul>
                  * 内容正确优先于「形式上更标准」，所以保持 Playback。
                  */
-                .sessionName(SdpMessage.S_PLAYBACK)
+                .sessionName(asDownload ? SdpMessage.S_DOWNLOAD : SdpMessage.S_PLAYBACK)
                 .uri(uri)
                 .connection(props.getMediaIp())
                 .time(timeRange)

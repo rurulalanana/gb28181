@@ -447,6 +447,17 @@ public class StreamService {
      */
     public GbStream startPlayback(String deviceId, String channelId, RecordItem item,
                                   int downloadSpeed) {
+        return startPlayback(deviceId, channelId, item, downloadSpeed, false);
+    }
+
+    /**
+     * 开始历史回放 / 下载。
+     *
+     * @param asDownload {@code true} 时按标准 9.9 用下载会话（{@code s=Download}）发起，
+     *                   这是<b>倍速唯一普遍生效</b>的方式；普通回放保持 {@code s=Playback}
+     */
+    public GbStream startPlayback(String deviceId, String channelId, RecordItem item,
+                                  int downloadSpeed, boolean asDownload) {
         String channel = (channelId == null || channelId.isBlank()) ? deviceId : channelId;
 
         /*
@@ -504,7 +515,7 @@ public class StreamService {
             stop(deviceId, channel, MediaType.PLAYBACK);
         }
         RtpSession session = platform.mediaService()
-                .playback(deviceId, channel, item, downloadSpeed);
+                .playback(deviceId, channel, item, downloadSpeed, asDownload);
         GbStream stream = toStream(session, GbStream.TYPE_PLAYBACK);
         save(stream);
         return stream;
