@@ -136,11 +136,28 @@
       </dependency>
 
       <!-- ========== 通用第三方 ========== -->
-      <dependency>
-        <groupId>org.slf4j</groupId>
-        <artifactId>slf4j-api</artifactId>
-        <version>${slf4j.version}</version>
-      </dependency>
+      <!--
+        ⚠️ 这里【不要】声明 org.slf4j:slf4j-api。
+
+        根 pom 的 dependencyManagement 会继承给全部子模块，优先级高于
+        gb28181-platform-starter 里 import 的 spring-boot-dependencies BOM。
+        一旦在这里钉 slf4j-api，starter 拿到的就是被钉住的版本，
+        而 Spring Boot 3.2.5 的 logback 1.4.14 要求 SLF4J 2.x —— 启动直接抛：
+
+          IllegalArgumentException: LoggerFactory is not a Logback LoggerContext
+          but Logback is on the classpath. ... competing implementation
+          (class org.slf4j.helpers.NOPLoggerFactory loaded from
+           .../slf4j-api-1.7.36.jar)
+
+        然后守护进程无限重启，日志里只有这一条，很容易误判成打包坏了。
+
+        各协议/SDK 模块（sip、sip-zlm、sdk-dahua、sdk-hikvision）需要 1.7.36 时，
+        都在自己的 <dependency> 里显式写 <version>${slf4j.version}</version>；
+        进入 starter 的 classpath 时会被 Spring Boot BOM 统一提成 2.0.13
+        （SLF4J 2 对 1.7 的 API 向后兼容，这些模块无需改动）。
+
+        junit 是 test scope，不影响运行时，保留在这里统一版本。
+      -->
       <dependency>
         <groupId>org.junit.jupiter</groupId>
         <artifactId>junit-jupiter</artifactId>
