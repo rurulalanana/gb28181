@@ -43,6 +43,18 @@ replay_pid*.log
 /pom-backup-*/
 .pom-backup-*/
 
+# 排查问题时经常临时写个 fix_poms.py / unify_java.py 丢在仓库根目录
+# 或某个模块根目录（历史上 sdk-dahua/parse_record.py 就是这么留下的）。
+# 这类脚本不参与构建，留在仓库里只会让人猜「它是不是构建的一部分」。
+#
+# 约定：要长期保留的脚本放 <模块>/scripts/ 下，并在文档里写明用途。
+# 所以下面把「根目录」和「模块根目录」这两层的脚本一律按临时文件处理 ——
+# /*/*.py 只匹配一层深，scripts/ 下的脚本在第二层，不受影响。
+/*.py
+/*.ps1
+/*/*.py
+/*/*.ps1
+
 # ⚠️ 只忽略根目录的 *.sha1（当初遗留的 netsdk 校验文件）。
 # 不能写成全局 *.sha1 —— sdk-dahua/lib/netsdk-repo 是 Maven 本地仓库镜像，
 # 里边的 .sha1 是它的校验文件，漏了会让离线构建报校验失败。
