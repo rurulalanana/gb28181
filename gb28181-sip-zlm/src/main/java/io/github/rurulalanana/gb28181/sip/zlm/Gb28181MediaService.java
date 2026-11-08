@@ -1590,14 +1590,18 @@ public class Gb28181MediaService implements SipCallback {
                 .recvonly()
                 .ssrc(session.getSsrc());
         /*
-         * 只在确实要倍速时才写 a=downloadspeed。
+         * 只在确实要倍速时才写倍速属性。
          *
          * <p>普通回放（1 倍速）不写：一是与改造前的报文完全一致，
          * 不会让「看回放」被设备当成下载请求；二是部分设备严格校验
          * 倍速档位，写 1 反而可能被拒。
+         *
+         * <p><b>两个属性一起写</b>：{@code a=downloadspeed} 是 9.9 下载场景的写法，
+         * {@code a=Scale} 是回放场景里设备更常认的写法。实测本平台对接的下级平台
+         * 两者都不认（推流码率纹丝不动），但对认其中之一的设备，少写一个就等于没有倍速。
          */
         if (downloadSpeed > SPEED_UNLIMITED) {
-            sdp.downloadspeed(downloadSpeed);
+            sdp.downloadspeed(downloadSpeed).scale(downloadSpeed);
         }
         return sdp;
     }

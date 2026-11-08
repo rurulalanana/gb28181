@@ -1069,7 +1069,7 @@ async function onRateChange(rate) {
   await control('scale', { scale: rate })
   const startBuffer = player.bufferEnd()
   const startAt = Date.now()
-  rateWatchTimer = setTimeout(() => {
+  rateWatchTimer = setTimeout(async () => {
     rateWatchTimer = null
     if (playRate.value !== rate) return
     const elapsed = (Date.now() - startAt) / 1000
@@ -1082,6 +1082,13 @@ async function onRateChange(rate) {
     }
     markSpeedUnsupported()
     deviceRate = 1
+    /*
+     * 先把设备那侧的 Scale 复位成 1 再开始跳播。
+     *
+     * <p>万一设备其实认 Scale（只是本地判据在 WebRTC 下失效），
+     * 不复位就会「设备 2 倍速 × 本地跳播 2 倍速」= 实际 4 倍速。
+     */
+    await control('scale', { scale: 1 })
     ElMessage.warning('该设备不支持信令变速，改用跳播快进（画面按段向前跳）')
     startJumpSpeed()
   }, 4000)
@@ -1123,7 +1130,15 @@ function markSpeedUnsupported() {
 /** 跳播快进的定时器句柄。 */
 let jumpTimer = null
 
-/** 跳播快进：设备支持 npt 却不支持 Scale，用连续跳播模拟（2 倍速 = 每 2 秒墙钟跳 4 秒）。 */
+/**
+ * 跳播快进：设备支持 npt 却不支持 Scale，用连续跳播模拟（2 倍速 = 每 2 秒墙钟跳 4 秒）。
+ *
+ * <p><b>步长必须从「内容位置」算，不能从媒体时钟算</b>：媒体时钟只表示
+ * 「这段流收了多久」，恒按 1 倍速走；内容位置 = {@code positionOffset + 媒体时钟}。
+ * 早先直接拿媒体时钟加步长，目标点每跳只前进「墙钟秒数」（1 倍速），
+ * 于是跳播形同虚设 —— 日志里能看到的症状是：2 倍速下每 2 秒一次的 SEEK，
+ * range 每次只 +2 秒而不是 +4 秒。
+ */
 function startJumpSpeed() {
   clearJumpTimer()
   speedMode.value = 'jump'
@@ -1136,7 +1151,9 @@ function startJumpSpeed() {
       speedMode.value = 'device'
       return
     }
-    const next = Math.floor((player.position.value || 0) + (playRate.value * STEP_MS) / 1000)
+    const media = player.position.value || 0
+    const content = (positionOffset.value || 0) + media
+    const next = Math.floor(content + (playRate.value * STEP_MS) / 1000)
     const duration = Number(segmentSeconds.value) || 0
     if (duration > 0 && next >= duration - 2) {
       // 到段尾：交回正常播放/切段逻辑，别把设备跳到越界位置
@@ -1154,7 +1171,7 @@ function startJumpSpeed() {
         command: 'seek',
         range: next
       })
-      positionOffset.value = Math.max(0, next - (player.position.value || 0))
+      positionOffset.value = Math.max(0, next - media)
     } catch (e) {
       clearJumpTimer()
       playRate.value = 1

@@ -203,6 +203,14 @@ public class PlaybackController {
         int downloadSpeed = Boolean.TRUE.equals(req.getDownload())
                 ? Math.max(1, req.getDownloadSpeed() == null ? 1 : req.getDownloadSpeed())
                 : 1;
+        /*
+         * 回放倍速只走 INVITE 的 SDP：设备对中途 INFO + Scale 普遍不响应
+         * （实测本平台对接的下级平台完全不响应，推流码率不变），
+         * 因此「切倍速」在前端表现为重新点播该段，代价是 1~2 秒重新协商。
+         */
+        if (req.getSpeed() != null && req.getSpeed() > 1) {
+            downloadSpeed = Math.max(downloadSpeed, req.getSpeed());
+        }
         GbStream stream = streamService.startPlayback(deviceId, channelId, item, downloadSpeed);
         // 必须按回放会话取地址：session(deviceId, channelId) 查的是直播键（无类型后缀），
         // 云端录像保活使通道长期有直播流，会返回直播地址（OSD 显示当下时间）。

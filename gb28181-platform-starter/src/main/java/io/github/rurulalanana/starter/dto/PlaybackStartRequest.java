@@ -22,6 +22,15 @@ public class PlaybackStartRequest extends DeviceRef {
     /** 下载倍速，仅 {@code download=true} 时有效。 */
     private Integer downloadSpeed = 4;
 
+    /**
+     * 回放倍速（1 为正常）。
+     *
+     * <p>与 {@code downloadSpeed} 的区别只是「要不要顺带录制」：
+     * 倍速都必须由设备执行，而设备只认 INVITE 的 SDP，
+     * 所以任何倍速都只能靠<b>重新发起 INVITE</b> 生效，中途改不了。
+     */
+    private Integer speed;
+
     /** 设备侧文件路径（来自 {@code playback/recordlist} 的 FilePath）。 */
     private String filePath;
 

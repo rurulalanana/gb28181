@@ -230,6 +230,20 @@ public class SdpMessage {
         return attr("downloadspeed:" + speed);
     }
 
+    /**
+     * {@code a=Scale:x}：请求设备按 x 倍速推送录像。
+     *
+     * <p><b>为什么还要写 Scale</b>：{@code a=downloadspeed} 是 9.9 下载场景的属性，
+     * 回放场景里不少设备（NDVR / 下级平台）只认 SDP 里的 {@code Scale}，
+     * 对中途 {@code INFO + Scale} 一律不响应。两者并存互不冲突：
+     * 设备认哪个用哪个，都不认就退化为 1 倍速。
+     *
+     * @param speed 倍速（1 为正常）
+     */
+    public SdpMessage scale(double speed) {
+        return attr("Scale:" + String.format(java.util.Locale.ROOT, "%.6f", speed));
+    }
+
     /** 追加任意 {@code a=} 属性。 */
     public SdpMessage attr(String attr) {
         this.attributes = this.attributes.isEmpty() ? attr : this.attributes + "\r\n" + attr;
