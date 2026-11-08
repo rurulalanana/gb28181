@@ -155,7 +155,7 @@
               <el-icon :size="30"><VideoCamera /></el-icon>
               <span class="overlay-text">{{ tile.state }}</span>
               <span v-if="tile.channelKey" class="overlay-hint">点击重试</span>
-              <span v-else class="overlay-hint">从左侧选择通道</span>
+              <span v-else class="overlay-hint">点击这里选择通道</span>
             </div>
 
             <button
@@ -174,6 +174,27 @@
               @click.stop="clearTile(tile)"
             >
               <el-icon :size="13" aria-hidden="true"><Close /></el-icon>
+            </button>
+
+            <!--
+              声音角标：浏览器标签页的小喇叭只在「真的出声」时才亮，
+              而源流没有音轨、或者多格同播被静音时它永远不亮 ——
+              直接在画面上标出状态，免得反复怀疑平台没声音。
+            -->
+            <button
+              v-if="tile.playing"
+              type="button"
+              class="tile-audio"
+              :class="{ 'is-off': tile.muted || tile.hasAudio === false, 'is-none': tile.hasAudio === false }"
+              :title="tile.hasAudio === false ? '该通道无音频' : (tile.muted ? '点击开声音' : '点击静音')"
+              :aria-label="tile.hasAudio === false ? '该通道无音频' : (tile.muted ? '点击开声音' : '点击静音')"
+              @click.stop="tile.hasAudio === false ? null : toggleTileMute(tile)"
+            >
+              <template v-if="tile.hasAudio === false">无音频</template>
+              <el-icon v-else :size="14">
+                <Mute v-if="tile.muted" />
+                <Headset v-else />
+              </el-icon>
             </button>
           </div>
         </div>
@@ -271,7 +292,7 @@
 
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, controlApi } from '@/api'
@@ -407,7 +428,11 @@ const tiles = ref(
     /** 通道的云台类型：3（固定枪机）时右侧云台面板置灰。 */
     ptzType: 0,
     state: '未选择通道',
-    playing: false
+    playing: false,
+    /** 该通道是否真的带音轨（null=还没测出来）。 */
+    hasAudio: null,
+    /** 播放器当前是否静音（角标与点击切换用）。 */
+    muted: true
   }))
 )
 
@@ -500,6 +525,13 @@ function onTileClick(tile) {
   activeTileId.value = tile.id
   // 点了带通道的格子：云台跟着切到这一格
   if (tile.channelKey) ptzTileId.value = tile.id
+  /*
+   * 空画面格：聚焦到左侧通道面板。窄窗口（≤1100px）三栏会堆成一列，
+   * 面板常在屏幕外，只写「从左侧选择通道」等于让用户去猜。
+   */
+  if (!tile.channelKey) {
+    pickChannelFor()
+  }
   const now = Date.now()
   if (tileClick.id === tile.id && now - tileClick.ts < 320) {
     tileClick.ts = 0
@@ -508,6 +540,19 @@ function onTileClick(tile) {
   }
   tileClick.id = tile.id
   tileClick.ts = now
+}
+
+/** 把注意力引到通道面板（平铺列表比设备树少一次展开，选通道更快）。 */
+function pickChannelFor() {
+  treeTab.value = 'list'
+  nextTick(() => {
+    const panel = document.querySelector('.tree-panel')
+    if (panel && typeof panel.scrollIntoView === 'function') {
+      panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+    const input = document.querySelector('.panel-search input')
+    if (input && typeof input.focus === 'function') input.focus({ preventScroll: true })
+  })
 }
 
 function toggleFullscreen(tile) {
@@ -569,7 +614,13 @@ function playerOf(tile) {
   if (!players[tile.id]) {
     // 播放器渲染到容器 div 内，传入容器 ref 供播放器创建 video
     const containerRef = ref(containerRefs[tile.id])
-    const api = useLivePlayer(containerRef)
+    const api = useLivePlayer(containerRef, {
+      // 音轨结论同步到格子：角标要能一眼看出「有声/无音频」，不用去翻浏览器标签页的小喇叭
+      onAudioChange: (has) => {
+        tile.hasAudio = has
+        tile.muted = has ? false : true
+      }
+    })
     players[tile.id] = { api, tile, containerRef }
     // 播放器状态同步到格子（替代轮询）
     stoppers[tile.id] = watch(
@@ -584,6 +635,15 @@ function playerOf(tile) {
   // 格子可能被重建（如切换分屏数），同步最新 DOM
   players[tile.id].containerRef.value = containerRefs[tile.id]
   return players[tile.id].api
+}
+
+/** 点角标切换静音（多格同播默认静音，用户想听某一路时点它）。 */
+function toggleTileMute(tile) {
+  const api = players[tile.id]?.api
+  if (!api) return
+  const next = !tile.muted
+  api.setMuted(next)
+  tile.muted = next
 }
 
 async function loadChannels() {
@@ -932,6 +992,45 @@ onUnmounted(() => {
 .tile-clear:hover {
   background: var(--danger-500);
   color: var(--white);
+}
+
+/* 声音状态角标：与「清除」同一排，左移一格，避免两个按钮重叠 */
+.tile-audio {
+  position: absolute;
+  top: 8px;
+  right: 36px;
+  z-index: 3;
+  height: 22px;
+  min-width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 11px;
+  background: rgba(8, 13, 20, 0.62);
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.tile:hover .tile-audio {
+  opacity: 1;
+}
+
+.tile-audio.is-off {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+/* 源流压根没有音轨：不可点，灰掉 */
+.tile-audio.is-none {
+  cursor: default;
+  background: rgba(8, 13, 20, 0.45);
+  color: rgba(255, 255, 255, 0.45);
 }
 
 /* 分屏切换（1/4/6/9/16）压到与其它控件同高，避免顶栏高低不齐 */
@@ -1297,9 +1396,23 @@ onUnmounted(() => {
   .ptz-aside {
     grid-column: auto;
   }
-  .tree-panel,
+  /*
+   * 必须给树栏显式高度：单列下三行都是 auto，而树栏内部是 flex（列表 flex:1 +
+   * overflow-y:auto，最小高度 0），墙又有 min-height:320px。1366×768 这类窄窗口里
+   * 空间不够时，网格会把树栏压到只剩面板头 + 搜索框，通道列表高度 8px ——
+   * 表现就是「左边一个通道都看不到，没法点播」。
+   */
+  .tree-panel {
+    height: 46vh;
+    min-height: 220px;
+    max-height: 420px;
+  }
   .ptz-aside {
-    max-height: 280px;
+    height: 240px;
+    max-height: 240px;
+  }
+  .channel-list {
+    min-height: 120px;
   }
   .wall {
     min-height: 320px;

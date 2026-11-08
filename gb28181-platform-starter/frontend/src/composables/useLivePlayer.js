@@ -308,6 +308,8 @@ export function useLivePlayer(containerRef, hooks = {}) {
            * 电视墙（多格同播）必须继续静音，由调用方传 keepMuted 抑制。
            */
           if (has && !opts.keepMuted && engine) engine.setMuted(false)
+          const cb = playOpts.onAudioChange || hooks.onAudioChange
+          if (typeof cb === 'function') cb(has)
         },
         onReady: () => {
           if (disposed) return finish(true)
