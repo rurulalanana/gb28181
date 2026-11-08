@@ -80,3 +80,6 @@ npm-debug.log*
 # ---------- Python ----------
 __pycache__/
 *.pyc
+
+# ---------- 本地协作临时单据 ----------
+SESSION-SYNC.md

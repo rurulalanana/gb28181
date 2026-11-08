@@ -1,7 +1,7 @@
 # gb28181-platform-starter
 
-**GB28181 流媒体平台 Starter**：把 [`gb28181-sip`](https://central.sonatype.com/artifact/io.github.rurulalanana/gb28181-sip)（信令）
-与 [`gb28181-sip-zlm`](https://github.com/rurulalanana/gb28181-sip-zlm)（媒体，内嵌 ZLMediaKit）
+**GB28181 流媒体平台 Starter**：把 [`gb28181-sip`](../gb28181-sip)（信令）
+与 [`gb28181-sip-zlm`](../gb28181-sip-zlm)（媒体，内嵌 ZLMediaKit）
 装配成一个可运行的 Spring Boot 工程。克隆即可当作你的平台起点：REST API、Vue 3 管理前端、
 设备/通道/流/录像/报警入库、云端录像对象存储归档、启动自检都已接好，改配置与包名就能直接用。
 

@@ -1,9 +1,11 @@
-# gb28181 工作区
+# gb28181
 
-GB28181 视频平台的聚合工作区。**六个子目录各自是独立的 git 仓库**，各自提交、各自发布；
-本目录本身不是仓库，只提供一个 Maven 聚合 pom 用于一次性构建全部模块。
+GB/T 28181 视频监控平台。**单仓库 + Maven 父子工程**：根 `pom.xml` 是 parent，
+六个子目录是它的 module，由 Maven 自动推导构建顺序。
 
-> 本文件不在任何 git 仓库里，是纯本地说明。改它不影响任何提交。
+仓库地址：<https://github.com/rurulalanana/gb28181>
+
+> 原先六个模块是六个独立仓库，已合并到本仓库（旧仓库已归档，只读保留）。
 
 ---
 
@@ -11,26 +13,28 @@ GB28181 视频平台的聚合工作区。**六个子目录各自是独立的 git
 
 ```
 C:\Users\lixianzhao\IdeaProjects\gb28181\
-├── pom.xml                       聚合构建（不是 parent，见 §3）
+├── pom.xml                       parent pom（modules + 统一 java.version=17）
 ├── README.md                     本文件
-├── .vscode\                      工作区级配置（tasks / mcp / settings）
+├── .gitignore / .gitattributes   根级忽略规则与 Git LFS 规则
+├── .github\                      Copilot 工作区说明（copilot-instructions.md）
+├── .vscode\                      工作区级配置（tasks / mcp / settings，已 gitignore）
 │
-├── gb28181-sip\                  信令层            v1.0.14   独立仓库 ✓
-├── gb28181-sip-zlm\              媒体层            v1.0.11   独立仓库 ✓
-├── device-access\                厂商无关接入契约  v1.0.0    独立仓库 ✓
-├── sdk-dahua\                    大华设备接入      v1.0.0    独立仓库 ✓
-├── sdk-hikvision\                海康设备接入      v1.0.0    独立仓库 ✓
-└── gb28181-platform-starter\     平台应用          v1.0.2    独立仓库 ✓
+├── gb28181-sip\                  信令层            v1.0.14
+├── gb28181-sip-zlm\              媒体层            v1.0.11
+├── device-access\                厂商无关接入契约  v1.0.0
+├── sdk-dahua\                    大华设备接入      v1.0.0   （lib/ 走 Git LFS）
+├── sdk-hikvision\                海康设备接入      v1.0.0   （lib/ 走 Git LFS）
+└── gb28181-platform-starter\     平台应用          v1.0.2
 ```
 
-| 模块 | artifactId | 版本 | 远程 | 职责 |
-|---|---|---|---|---|
-| sip | `gb28181-sip` | 1.0.14 | [rurulalanana/gb28181-sip](https://github.com/rurulalanana/gb28181-sip) | SIP 栈、MANSCDP 编解码、SDP、级联 |
-| sip-zlm | `gb28181-sip-zlm` | 1.0.11 | [rurulalanana/gb28181-sip-zlm](https://github.com/rurulalanana/gb28181-sip-zlm) | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
-| device-access | `device-access` | 1.0.0 | [rurulalanana/device-access](https://github.com/rurulalanana/device-access) | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
-| sdk-dahua | `sdk-dahua` | 1.0.0 | [rurulalanana/sdk-dahua](https://github.com/rurulalanana/sdk-dahua) | 大华 NetSDK 接入：直连 + 主动注册 |
-| sdk-hikvision | `sdk-hikvision` | 1.0.0 | [rurulalanana/sdk-hikvision](https://github.com/rurulalanana/sdk-hikvision) | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 |
-| starter | `gb28181-platform-starter` | 1.0.2 | [rurulalanana/gb28181-platform-starter](https://github.com/rurulalanana/gb28181-platform-starter) | Spring Boot 应用、REST、Vue 前端、业务表 |
+| 模块 | artifactId | 版本 | 职责 |
+|---|---|---|---|
+| sip | `gb28181-sip` | 1.0.14 | SIP 栈、MANSCDP 编解码、SDP、级联 |
+| sip-zlm | `gb28181-sip-zlm` | 1.0.11 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
+| device-access | `device-access` | 1.0.0 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
+| sdk-dahua | `sdk-dahua` | 1.0.0 | 大华 NetSDK 接入：直连 + 主动注册 |
+| sdk-hikvision | `sdk-hikvision` | 1.0.0 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 |
+| starter | `gb28181-platform-starter` | 1.0.2 | Spring Boot 应用、REST、Vue 前端、业务表 |
 
 > **命名约定 `sdk-<厂商>`**：接海康就是平级的 `sdk-hikvision`，接宇视就是 `sdk-uniview`。
 > 契约包 `io.github.rurulalanana.deviceaccess` 与厂商无关，不随模块名变。
@@ -198,13 +202,11 @@ npm --prefix frontend run build        # 产物直接写进 src/main/resources/s
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | **starter 7 个提交未推送** | 领先 `origin/main`（`31a6ba4`）7 个提交，见 §5 |
-| 2 | **starter 有 6 个文件未提交** | 大华接入的改动，见 §5 |
-| 3 | ~~`sdk-dahua` 无远程仓库~~ | 已解决：已推送至 [rurulalanana/sdk-dahua](https://github.com/rurulalanana/sdk-dahua) |
-| 4 | ~~`DeviceAccessTest.java` 丢失~~ | 已在 `sdk-dahua/src/test/` 补齐（26 个单测），见 §4.2 |
-| 5 | 版本号建议 | starter 停在 1.0.2，但同名下已发过多个不同内容的 jar，建议升 1.0.3 |
-| 6 | `.agents/skills/agent-architecture/` 未跟踪 | 在 starter 里，既没提交也没 gitignore |
-| 7 | 旧目录待删 | `IdeaProjects\gb28181-platform-starter`（1 GB）切换工作区后可删 |
+| 1 | 版本号建议 | starter 停在 1.0.2，但同名下已发过多个不同内容的 jar，建议升 1.0.3 |
+| 2 | sip-zlm 3 个单测失败 | `Gb28181MediaPlatformE2ETest` 2× `403 Forbidden`、`RecordPlaybackUnitTest` 1× SDP 属性缺失；已用旧 pom 基线验证，**属重构前既有问题**，与合并无关 |
+| 3 | 旧目录待删 | `IdeaProjects\gb28181-platform-starter`（1 GB）切换工作区后可删 |
+| 4 | ~~六个独立仓库~~ | 已合并为单仓库 [rurulalanana/gb28181](https://github.com/rurulalanana/gb28181)，旧仓库已全部归档 |
+| 5 | ~~Python 检查脚本硬编码口令~~ | 已改为从环境变量 `GB_KNOWN_SECRETS` 注入 |
 
 ---
 

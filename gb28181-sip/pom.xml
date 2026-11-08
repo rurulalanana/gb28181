@@ -247,14 +247,16 @@
       </distributionManagement>
     </profile>
 
-    <!-- GitHub Packages：mvn deploy -Pgithub -->
+    <!-- GitHub Packages：mvn deploy -Pgithub
+         合并为单仓库后，GitHub Packages 的 Maven 端点挂在仓库上，
+         所以路径是 OWNER/REPO = rurulalanana/gb28181（不再是 gb28181-sip） -->
     <profile>
       <id>github</id>
       <distributionManagement>
         <repository>
           <id>github</id>
           <name>GitHub Packages</name>
-          <url>https://maven.pkg.github.com/rurulalanana/gb28181-sip</url>
+          <url>https://maven.pkg.github.com/rurulalanana/gb28181</url>
         </repository>
       </distributionManagement>
     </profile>

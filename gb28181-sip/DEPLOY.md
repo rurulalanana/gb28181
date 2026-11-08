@@ -195,7 +195,7 @@ mvn deploy -Pgithub
 ```xml
 <repository>
   <id>github</id>
-  <url>https://maven.pkg.github.com/rurulalanana/gb28181-sip</url>
+  <url>https://maven.pkg.github.com/rurulalanana/gb28181</url>
 </repository>
 ```
 
