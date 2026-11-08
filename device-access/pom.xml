@@ -7,14 +7,13 @@
   <parent>
     <groupId>io.github.rurulalanana</groupId>
     <artifactId>gb28181</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>device-access</artifactId>
-  <version>1.0.0</version>
   <packaging>jar</packaging>
 
   <name>device-access</name>

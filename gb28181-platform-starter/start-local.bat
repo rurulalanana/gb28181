@@ -44,7 +44,7 @@ if not defined GB_DB_PASSWORD (
 )
 
 java -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 ^
-  -jar target\gb28181-platform-starter-1.0.2.jar ^
+  -jar target\gb28181-platform-starter-2.0.0.jar ^
   --server.port=48088 ^
   --spring.datasource.password=%GB_DB_PASSWORD% ^
   --dahua.server-mode.enabled=true ^

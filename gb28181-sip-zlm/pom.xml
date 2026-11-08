@@ -7,14 +7,13 @@
   <parent>
     <groupId>io.github.rurulalanana</groupId>
     <artifactId>gb28181</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-sip-zlm</artifactId>
-  <version>1.0.11</version>
   <packaging>jar</packaging>
 
   <name>gb28181-sip-zlm</name>
@@ -55,7 +54,8 @@
       早期这里是 release 8，为了让只跑 JDK 8 的对接方也能用这个协议库；
       合并成单仓库后整个平台只交付一个 Spring Boot jar，不再独立发布，因此统一到 17。
     -->
-    <sip.module.version>1.0.14</sip.module.version>
+    <!-- 本模块版本、以及对 gb28181-sip 的依赖版本，都由根 pom 的
+         dependencyManagement 用 ${project.version} 统一给出，不在此声明。 -->
     <!--
       1.13.0 而非 1.12.0：内嵌的 ZLM 内核从 ac64e33(2026-07-24) 换到
       1026839(2026-09-22)，差两个月。
@@ -82,7 +82,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>gb28181-sip</artifactId>
-      <version>${sip.module.version}</version>
     </dependency>
 
     <!-- ZLMediaKit C API 的 Java 封装（JNA），jar 内自带全平台原生库 -->

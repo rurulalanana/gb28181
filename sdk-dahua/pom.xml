@@ -7,14 +7,13 @@
   <parent>
     <groupId>io.github.rurulalanana</groupId>
     <artifactId>gb28181</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>sdk-dahua</artifactId>
-  <version>1.0.0</version>
   <packaging>jar</packaging>
 
   <name>sdk-dahua</name>
@@ -41,8 +40,6 @@
     -->
     <jackson.version>2.15.4</jackson.version>
     <junit.version>5.10.2</junit.version>
-    <!-- 设备接入契约模块版本。 -->
-    <deviceaccess.version>1.0.0</deviceaccess.version>
     <!-- 大华 NetSDK 的 Java 部分（class 文件，4.7 MB）。
          大华不提供公开 Maven 仓库，因此 jar 随本仓库携带在
          lib/netsdk/netsdk-3.061.jar，由下方 install-netsdk-jar 自动装进本地仓库，
@@ -101,7 +98,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>device-access</artifactId>
-      <version>${deviceaccess.version}</version>
     </dependency>
 
     <!-- provided：不打进本模块产物、也不传递给上游。

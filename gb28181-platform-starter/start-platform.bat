@@ -29,10 +29,10 @@ set "SERVER_PORT="
 set "HTTP_PROXY="
 set "HTTPS_PROXY="
 
-if not exist "target\gb28181-platform-starter-1.0.2.jar" goto nojar
+if not exist "target\gb28181-platform-starter-2.0.0.jar" goto nojar
 
 echo [%date% %time%] starting platform >> ..\gb28181-local.log
-"%JAVA_HOME%\bin\java.exe" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar target\gb28181-platform-starter-1.0.2.jar --server.port=48088 --spring.datasource.password=%GB_DB_PASSWORD% --dahua.server-mode.enabled=true --gb28181.api-docs.protect=false --gb28181.rtc-extern-ip=auto >> ..\gb28181-local.log 2>&1
+"%JAVA_HOME%\bin\java.exe" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar target\gb28181-platform-starter-2.0.0.jar --server.port=48088 --spring.datasource.password=%GB_DB_PASSWORD% --dahua.server-mode.enabled=true --gb28181.api-docs.protect=false --gb28181.rtc-extern-ip=auto >> ..\gb28181-local.log 2>&1
 echo [%date% %time%] platform exited with code %errorlevel% >> ..\gb28181-local.log
 echo.
 echo �������˳�����������رմ��ڡ�
@@ -40,7 +40,7 @@ pause >nul
 goto :eof
 
 :nojar
-echo [ERROR] û�ҵ� target\gb28181-platform-starter-1.0.2.jar
+echo [ERROR] û�ҵ� target\gb28181-platform-starter-2.0.0.jar
 echo ����ִ��: mvn -o package -DskipTests -Dgpg.skip=true
 pause
 goto :eof

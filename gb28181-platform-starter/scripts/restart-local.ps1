@@ -52,8 +52,14 @@ $ErrorActionPreference = 'Stop'
 # ---- 路径 ----
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appDir = Split-Path -Parent $scriptDir          # gb28181-platform-starter
-$jarName = 'gb28181-platform-starter-1.0.2.jar'
-$jarPath = Join-Path $appDir "target\$jarName"
+# jar 文件名里带版本号，而版本号由根 pom 统一（当前 2.0.0）。
+# 写死文件名的话，每升一次版本这里就失效：要么找不到 jar，
+# 要么改了源码却重启了旧 jar（status 看起来一切正常，极易误判）。
+# 所以按 glob 取最新那个，排除 sources / javadoc / .original 这些副产物。
+$jarPattern = 'gb28181-platform-starter-*.jar'
+$jarFile = Get-ChildItem -Path (Join-Path $appDir 'target') -Filter $jarPattern -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '(-sources|-javadoc|\.original)$' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$jarName  = if ($jarFile) { $jarFile.Name } else { $jarPattern }
+$jarPath  = if ($jarFile) { $jarFile.FullName } else { Join-Path $appDir "target\$jarPattern" }
 
 $env:JAVA_HOME = 'C:\Program Files\BellSoft\LibericaJDK-21'
 $env:Path = "$env:JAVA_HOME\bin;$env:Path"
@@ -61,7 +67,7 @@ $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 <#
  找出「本项目的那个 java 进程」。
 
- 判据是命令行里出现 target\<jarName>。不要用进程名 java，
+ 判据是命令行里出现 gb28181-platform-starter-<版本>.jar。不要用进程名 java，
  也不要模糊匹配 gb28181 —— 同一台机器上可能有别的国标项目。
 #>
 function Get-AppProcess {
@@ -69,7 +75,7 @@ function Get-AppProcess {
     # 后续的 .Count / -join 都会失效。
     return @(
         Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
-            Where-Object { $_.CommandLine -and $_.CommandLine -like "*$jarName*" }
+            Where-Object { $_.CommandLine -and $_.CommandLine -like "*$jarPattern*" }
     )
 }
 

@@ -13,13 +13,14 @@ GB28181 **流媒体服务**：基于 [`gb28181-sip`](https://central.sonatype.co
 <dependency>
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-sip-zlm</artifactId>
-  <version>1.0.0</version>
+  <version>2.0.0</version>
 </dependency>
 ```
 
-> 依赖 `gb28181-sip` **1.0.2+**：
+> 依赖 `gb28181-sip` **2.0.0**（单仓库，与 gb28181-sip 同版本号）：
 > - 1.0.0 的 `respondInvite` 在 jain-sip 1.2.344 下会静默丢弃应答（ServerTransaction 恒为 null 且 200 OK 缺 Contact 头）
 > - 1.0.2 起补充了回放控制所需的 `client.info(deviceId, callId, sdp)`（INFO 会话内请求）
+> - 2.0.0 起全工程统一 Java 17 与统一版本号，两个协议库不再单独发版
 
 ## 快速开始
 

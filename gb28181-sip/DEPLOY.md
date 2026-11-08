@@ -100,9 +100,9 @@ mvn clean deploy -Pcentral
 构建产物：
 
 ```
-target/gb28181-sip-1.0.0.jar           主构件
-target/gb28181-sip-1.0.0-sources.jar  源码
-target/gb28181-sip-1.0.0-javadoc.jar  文档
+target/gb28181-sip-2.0.0.jar           主构件
+target/gb28181-sip-2.0.0-sources.jar  源码
+target/gb28181-sip-2.0.0-javadoc.jar  文档
 ```
 
 每个构件对应的 `.asc` 签名文件由 `maven-gpg-plugin` 自动生成。
@@ -230,7 +230,9 @@ mvn clean deploy -Pcentral
 > 发布前先 `git log` 看有没有新提交。
 
 > 依赖本模块的下游（如 `gb28181-sip-zlm`、`gb28181-platform-starter`）
-> 记得同步 `<sip.module.version>` 并重新构建，否则 fat jar 里还是旧库。
+> 现在与本模块**同版本**，版本号由根 `pom.xml` 单点决定，
+> 不再需要手工同步 `<sip.module.version>`（该属性已删除）。
+> 但发布新版本后仍要 `mvn clean install` 重建 fat jar，否则打出来的 jar 里还是旧的库。
 
 ---
 

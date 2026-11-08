@@ -5,14 +5,16 @@ GB/T 28181 视频监控平台的六个 Maven 模块，**单 git 仓库 + 父子�
 
 ## 1. 模块与边界
 
+六个模块**共用一个版本号**（当前 `2.0.0`），只写在根 `pom.xml` 的 `<version>`，子模块不写自己的版本。
+
 | 目录 | 版本 | 字节码目标 | 职责 |
 |---|---|---|---|
-| `gb28181-sip/` | 1.0.14 | Java 17 | SIP 栈、MANSCDP、SDP、级联、集群。**零 Spring 依赖**，只做协议层 |
-| `gb28181-sip-zlm/` | 1.0.11 | Java 17 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
-| `device-access/` | 1.0.0 | Java 17 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
-| `sdk-dahua/` | 1.0.0 | Java 17 | 大华设备接入：`dahua` 实现 + **原生库** |
-| `sdk-hikvision/` | 1.0.0 | Java 17 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 + **原生库** |
-| `gb28181-platform-starter/` | 1.0.2 | Java 17 | Spring Boot 3.2.5 应用、REST、Vue 前端、业务表 |
+| `gb28181-sip/` | 2.0.0 | Java 17 | SIP 栈、MANSCDP、SDP、级联、集群。**零 Spring 依赖**，只做协议层 |
+| `gb28181-sip-zlm/` | 2.0.0 | Java 17 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
+| `device-access/` | 2.0.0 | Java 17 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
+| `sdk-dahua/` | 2.0.0 | Java 17 | 大华设备接入：`dahua` 实现 + **原生库** |
+| `sdk-hikvision/` | 2.0.0 | Java 17 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 + **原生库** |
+| `gb28181-platform-starter/` | 2.0.0 | Java 17 | Spring Boot 3.2.5 应用、REST、Vue 前端、业务表 |
 
 依赖方向单向：`starter → sip-zlm → sip`，`starter → sip`，
 `starter → sdk-dahua → device-access`，`starter → sdk-hikvision → device-access`。
@@ -107,11 +109,12 @@ npm --prefix gb28181-platform-starter/frontend run build   # 产物写入 src/ma
 - **统一 Java 17**：全工程用 `maven.compiler.release=17`（定义在根 pom 的 `java.version`）。
   各模块不写 `source`/`target`，统一用 `release` —— 它会同时校验语法级别与平台 API，
   能拦住「本地 JDK 21 编译通过、目标 JDK 17 上 NoSuchMethodError」。
-  sip / sip-zlm 早期是 Java 8，合并成单仓库后统一到 17；它们的已发布版本 1.0.14 / 1.0.11
-  是 Java 8 字节码，**再发版必须提版本号**。
+  sip / sip-zlm 早期是 Java 8，合并成单仓库后统一到 17（字节码 52 → 61）。
+  这是破坏性变更，所以全工程版本一并提到 2.0.0，没有复用 Central 上的 1.0.x。
 - **不要在子模块写 `java.version`**：父 pom 是唯一来源，子模块写了会覆盖成两套口径。
-- **升级模块版本改两处**：根 `pom.xml` 的 `dependencyManagement`（内部模块版本）
-  与 `gb28181-platform-starter/pom.xml` 的 `sip.module.version` / `zlm.module.version` 等属性。
+- **不要在子模块写 `<version>`**：六个模块共用一个版本号，只在根 `pom.xml` 写一次，
+  模块间依赖由根 `dependencyManagement` 用 `${project.version}` 给出。
+  子模块自己写版本会让 fat jar 嵌进不同版本且**不报错**，只在运行时表现为行为不一致。
 - **不要把密码写进 `application.yml`**：它会被打进 jar 并公开。走环境变量
   `GB_DB_PASSWORD` / `GB_DB_URL` / `GB_DB_USERNAME`，本地覆盖写 `application-local.yml`（已 gitignore）。
   提交前跑 `py gb28181-platform-starter/scripts/check-secrets.py` 自查。

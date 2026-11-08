@@ -7,13 +7,12 @@
   <parent>
     <groupId>io.github.rurulalanana</groupId>
     <artifactId>gb28181</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-platform-starter</artifactId>
-  <version>1.0.2</version>
   <name>gb28181-platform-starter</name>
   <description>GB28181 流媒体平台 Starter：Spring Boot 集成 gb28181-sip（信令）+ gb28181-sip-zlm（媒体，内嵌 ZLMediaKit）</description>
 
@@ -53,14 +52,17 @@
     <!-- Spring Boot 版本：下面的 dependencyManagement import 它的 BOM -->
     <spring-boot.version>3.2.5</spring-boot.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <sip.module.version>1.0.14</sip.module.version>
-    <zlm.module.version>1.0.11</zlm.module.version>
-    <!-- 设备接入契约（厂商无关）。sdk-dahua / sdk-hikvision 都实现它。 -->
-    <deviceaccess.version>1.0.0</deviceaccess.version>
-    <!-- 大华设备接入（NetSDK 实现）。
-         命名约定 sdk-<厂商>：海康是平级的 sdk-hikvision。 -->
-    <sdk-dahua.module.version>1.0.0</sdk-dahua.module.version>
-    <sdk-hikvision.module.version>1.0.0</sdk-hikvision.module.version>
+    <!--
+      内部模块的版本不在这里声明。
+
+      gb28181-sip / gb28181-sip-zlm / device-access / sdk-dahua / sdk-hikvision
+      五个模块与本模块同版本，由根 pom 的 <dependencyManagement> 用
+      ${project.version} 统一给出，下面依赖它们时不写 <version>。
+
+      历史教训：这里曾用 sip.module.version / zlm.module.version / deviceaccess.version /
+      sdk-dahua.module.version / sdk-hikvision.module.version 五个属性，
+      加上根 pom 的五个硬编码版本，一次发版要改 11 处，漏改一处 fat jar 里就嵌了旧库。
+    -->
     <!-- 大华 NetSDK 的 Java 部分，需先 install 到本地仓库（不在中央仓库）。
          版本必须与 sdk-dahua 里的一致，否则运行时会缺类。 -->
     <netsdk.version>3.061</netsdk.version>
@@ -126,7 +128,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>gb28181-sip</artifactId>
-      <version>${sip.module.version}</version>
     </dependency>
 
     <!-- 设备接入契约（接口）。单独一个模块，不随厂商走：
@@ -134,7 +135,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>device-access</artifactId>
-      <version>${deviceaccess.version}</version>
     </dependency>
 
     <!-- 大华接入：契约 + 厂商实现（dahua 包）。
@@ -144,7 +144,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>sdk-dahua</artifactId>
-      <version>${sdk-dahua.module.version}</version>
     </dependency>
 
     <!-- 海康 ISUP 接入。原生库（libHCISUP*.so / .dll）按平台打进该 jar，
@@ -154,7 +153,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>sdk-hikvision</artifactId>
-      <version>${sdk-hikvision.module.version}</version>
     </dependency>
 
     <!--
@@ -185,7 +183,6 @@
     <dependency>
       <groupId>io.github.rurulalanana</groupId>
       <artifactId>gb28181-sip-zlm</artifactId>
-      <version>${zlm.module.version}</version>
     </dependency>
 
     <dependency>

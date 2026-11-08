@@ -13,28 +13,28 @@ GB/T 28181 视频监控平台。**单仓库 + Maven 父子工程**：根 `pom.xm
 
 ```
 C:\Users\lixianzhao\IdeaProjects\gb28181\
-├── pom.xml                       parent pom（modules + 统一 java.version=17）
+├── pom.xml                       parent pom（modules + 统一 java.version=17 + 统一版本 2.0.0）
 ├── README.md                     本文件
 ├── .gitignore / .gitattributes   根级忽略规则与 Git LFS 规则
 ├── .github\                      Copilot 工作区说明（copilot-instructions.md）
 ├── .vscode\                      工作区级配置（tasks / mcp / settings，已 gitignore）
 │
-├── gb28181-sip\                  信令层            v1.0.14
-├── gb28181-sip-zlm\              媒体层            v1.0.11
-├── device-access\                厂商无关接入契约  v1.0.0
-├── sdk-dahua\                    大华设备接入      v1.0.0   （lib/ 走 Git LFS）
-├── sdk-hikvision\                海康设备接入      v1.0.0   （lib/ 走 Git LFS）
-└── gb28181-platform-starter\     平台应用          v1.0.2
+├── gb28181-sip\                  信令层            v2.0.0
+├── gb28181-sip-zlm\              媒体层            v2.0.0
+├── device-access\                厂商无关接入契约  v2.0.0
+├── sdk-dahua\                    大华设备接入      v2.0.0   （lib/ 走 Git LFS）
+├── sdk-hikvision\                海康设备接入      v2.0.0   （lib/ 走 Git LFS）
+└── gb28181-platform-starter\     平台应用          v2.0.0
 ```
 
 | 模块 | artifactId | 版本 | 职责 |
 |---|---|---|---|
-| sip | `gb28181-sip` | 1.0.14 | SIP 栈、MANSCDP 编解码、SDP、级联 |
-| sip-zlm | `gb28181-sip-zlm` | 1.0.11 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
-| device-access | `device-access` | 1.0.0 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
-| sdk-dahua | `sdk-dahua` | 1.0.0 | 大华 NetSDK 接入：直连 + 主动注册 |
-| sdk-hikvision | `sdk-hikvision` | 1.0.0 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 |
-| starter | `gb28181-platform-starter` | 1.0.2 | Spring Boot 应用、REST、Vue 前端、业务表 |
+| sip | `gb28181-sip` | 2.0.0 | SIP 栈、MANSCDP 编解码、SDP、级联 |
+| sip-zlm | `gb28181-sip-zlm` | 2.0.0 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
+| device-access | `device-access` | 2.0.0 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
+| sdk-dahua | `sdk-dahua` | 2.0.0 | 大华 NetSDK 接入：直连 + 主动注册 |
+| sdk-hikvision | `sdk-hikvision` | 2.0.0 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 |
+| starter | `gb28181-platform-starter` | 2.0.0 | Spring Boot 应用、REST、Vue 前端、业务表 |
 
 > **命名约定 `sdk-<厂商>`**：接海康就是平级的 `sdk-hikvision`，接宇视就是 `sdk-uniview`。
 > 契约包 `io.github.rurulalanana.deviceaccess` 与厂商无关，不随模块名变。
@@ -128,7 +128,7 @@ mvn -o clean package -DskipTests -pl gb28181-platform-starter
 验证（jar 大小也是提示：win64 版大华 ~15MB，linux64 版 ~36MB）：
 
 ```bash
-unzip -l gb28181-platform-starter-1.0.2.jar | grep sdk-dahua    # 内嵌 jar
+unzip -l gb28181-platform-starter-2.0.0.jar | grep sdk-dahua    # 内嵌 jar
 # 再解开内嵌 jar 看是 linux64/ 还是 win64/
 ```
 
@@ -142,7 +142,8 @@ cd gb28181-sip
 & 'D:\maven\apache-maven-3.6.3\bin\mvn.cmd' -o deploy "-Dgpg.skip=true"
 ```
 
-与聚合构建完全等价 —— 版本号、git 历史、发布流程都还是这个模块自己的。
+与聚合构建等价。注意版本号现在由根 pom 统一（子模块不再各自发版），
+单独 deploy 发布的是同一个 2.0.0，不会再出现「子模块版本和 fat jar 里的不一致」。
 
 ### 2.4 前端
 
@@ -157,19 +158,44 @@ npm --prefix frontend run build        # 产物直接写进 src/main/resources/s
 
 ---
 
-## 3. 为什么聚合 pom 不是 parent
+## 3. 父子工程与版本号
 
-聚合（`<modules>`）和继承（`<parent>`）在 Maven 里是两件独立的事，这里只用前者：
+根 `pom.xml` 既是聚合（`<modules>`）又是 parent，六个模块都继承它。
 
-- 在本目录 `mvn install` → 按依赖顺序一次编译六个
-- 进任一子目录 `mvn deploy` → 与拆开前完全一致
+### 3.1 版本号只有一个来源
 
-不设 parent 的理由：
+**全工程共用一个版本号，写在根 `pom.xml` 的 `<version>`。** 子模块不写自己的 `<version>`，
+模块之间的依赖也不写硬编码版本（根 pom 的 `dependencyManagement` 用 `${project.version}` 给出）。
 
-1. 六个模块版本各自演进（1.0.14 / 1.0.11 / 1.0.0 / 1.0.0 / 1.0.0 / 1.0.2），挂同一个 parent 要么被强制统一版本，
-   要么 parent 里塞满 `dependencyManagement`，每次升级都得改它
-2. **starter 必须保留 `spring-boot-starter-parent`**（Java 只有一个 parent），
-   改接自建 parent 等于手工接管 Spring Boot 的全部依赖管理与插件配置 —— 那是倒退
+```
+根 pom:      <version>2.0.0</version>            ← 唯一版本号
+子 pom:      <parent><version>2.0.0</version></parent>
+             没有自己的 <version>
+starter 依赖: <artifactId>gb28181-sip</artifactId>  ← 不写 <version>
+```
+
+升级版本：改根 pom 那一行 → `mvn clean install` → 完成。
+
+**为什么改成这样**：以前版本号散在 11 处（根 pom 五个 `dependencyManagement` +
+starter 五个 `xxx.module.version` 属性 + 各模块自己的 `<version>`），
+发一次版要全部改对；漏改一处**不会报错**，只会在运行时表现为「fat jar 里嵌的是旧库」。
+
+**为什么是 2.0.0**：`gb28181-sip` 在 Maven Central 上已发布到 1.0.6、`gb28181-sip-zlm` 到 1.0.4，
+那些都是 Java 8 字节码。本轮统一到 Java 17（字节码 52 → 61）是破坏性变更，
+不能复用 1.0.x 坐标，否则下游会拿到「版本号一样、JDK 加载不了」的东西。
+
+### 3.2 starter 为什么不继承 spring-boot-starter-parent
+
+Java 只允许一个 `<parent>`，而本项目已经用 `gb28181` 做父工程。等价替代：
+
+| 原来靠 starter-parent | 现在 |
+|---|---|
+| 依赖版本管理 | `<dependencyManagement>` import `spring-boot-dependencies:3.2.5` 的 BOM |
+| `-parameters` 编译参数 | `maven-compiler-plugin` 显式开 `<parameters>true</parameters>` |
+| `spring-boot-maven-plugin` repackage 绑定 | 显式写 `<executions>` |
+
+⚠️ `-parameters` 不能漏：Spring MVC 靠它从字节码读参数名，
+漏了会让 `@RequestParam` 省略 value 时启动报 `Name for argument of type ... not specified`。
 
 ---
 
@@ -202,7 +228,7 @@ npm --prefix frontend run build        # 产物直接写进 src/main/resources/s
 
 | # | 事项 | 说明 |
 |---|---|---|
-| 1 | 版本号建议 | starter 停在 1.0.2，但同名下已发过多个不同内容的 jar，建议升 1.0.3 |
+| 1 | ~~版本号散落在 11 处~~ | 已统一为 **2.0.0**，由根 `pom.xml` 的 `<version>` 单点决定 |
 | 2 | sip-zlm 3 个单测失败 | `Gb28181MediaPlatformE2ETest` 2× `403 Forbidden`、`RecordPlaybackUnitTest` 1× SDP 属性缺失；已用旧 pom 基线验证，**属重构前既有问题**，与合并无关 |
 | 3 | 旧目录待删 | `IdeaProjects\gb28181-platform-starter`（1 GB）切换工作区后可删 |
 | 4 | ~~六个独立仓库~~ | 已合并为单仓库 [rurulalanana/gb28181](https://github.com/rurulalanana/gb28181)，旧仓库已全部归档 |
