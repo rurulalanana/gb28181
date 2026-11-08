@@ -48,6 +48,13 @@ export function useLivePlayer(containerRef, hooks = {}) {
   const videoInfo = ref(null)
   const position = ref(0)
   const currentUrl = ref('')
+  /**
+   * 当前流是否带音轨：`null` 未测出、`true` 有、`false` 源流本身没有音频。
+   *
+   * 用来区分「用户没开声音」与「这条通道根本没有音频」——国标通道无音频很常见
+   * （ZLM 的 WebRTC answer 会把音频段标成 `a=inactive`，浏览器不建轨）。
+   */
+  const hasAudio = ref(null)
 
   let engine = null
   let host = null
@@ -115,6 +122,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     disposed = false
     currentStream.value = streamId
     currentUrl.value = ''
+    hasAudio.value = null
     /*
      * 实时流一律隐藏进度条：直播与设备回放都是主动推上来的码流，没有可 seek 的时间轴。
      * video.js 按 seekable() 显隐进度条，播放过程中宽度反复变化、按钮忽左忽右。
@@ -174,6 +182,7 @@ export function useLivePlayer(containerRef, hooks = {}) {
     stop()
     disposed = false
     currentStream.value = ''
+    hasAudio.value = null
     playOpts = opts
     if (!url) {
       state.value = '缺少播放地址'
@@ -291,6 +300,15 @@ export function useLivePlayer(containerRef, hooks = {}) {
         controlButtons: opts.controlButtons || null,
         onControlButton: opts.onControlButton,
         onDebug: (stage, extra) => log('lp', { stage, ...(extra || {}) }),
+        onAudioChange: (has) => {
+          hasAudio.value = has
+          /*
+           * 有音轨就取消静音：浏览器只允许「静音」的媒体自动播放，所以起播必须是静音的；
+           * 但用户点「回放/播放」这一步已经给了页面用户激活，起播后解除静音是允许的。
+           * 电视墙（多格同播）必须继续静音，由调用方传 keepMuted 抑制。
+           */
+          if (has && !opts.keepMuted && engine) engine.setMuted(false)
+        },
         onReady: () => {
           if (disposed) return finish(true)
           playing.value = true
@@ -683,6 +701,20 @@ export function useLivePlayer(containerRef, hooks = {}) {
     if (state.value === '播放中') state.value = '已停止'
   }
 
+  /**
+   * 设置静音。
+   *
+   * @param {boolean} m 是否静音
+   */
+  function setMuted(m) {
+    if (engine) engine.setMuted(!!m)
+  }
+
+  /** 取消静音（界面上的音量按钮走这里）。 */
+  function unmute() {
+    setMuted(false)
+  }
+
   return {
     playing,
     state,
@@ -691,6 +723,9 @@ export function useLivePlayer(containerRef, hooks = {}) {
     currentUrl,
     videoInfo,
     position,
+    hasAudio,
+    setMuted,
+    unmute,
     setPlaybackRate,
     bufferEnd,
     play,

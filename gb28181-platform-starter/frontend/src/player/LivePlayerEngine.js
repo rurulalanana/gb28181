@@ -250,11 +250,17 @@ export class LivePlayerEngine {
     onReady,
     onStats,
     vod = false,
+    onAudioChange,
     onDebug
   }) {
     this.url = url
     this.el = el
     this.muted = muted
+    /** 音轨存在性回调（`true/false`），只在结论变化时触发一次。 */
+    this.onAudioChange = onAudioChange || (() => {})
+    /** 已上报过的音轨结论，null = 还没测出来。 */
+    this._audioKnown = null
+    this._audioTimer = null
     this.hasAudio = hasAudio
     this.webrtc = webrtc
     this.controls = controls
@@ -559,6 +565,9 @@ export class LivePlayerEngine {
     v.__lpBound = true
     this.videoEl = v
     this._dbg('video-el-found', { tag: v.tagName, cls: v.className })
+    // 用户已经点过「取消静音」就保持放开：组件重建 video 元素会把 muted 带回 true
+    if (!this.muted) v.muted = false
+    this._startAudioWatch()
 
     v.addEventListener('error', () => {
       const err = v.error
@@ -634,6 +643,72 @@ export class LivePlayerEngine {
     if (this._readyTimer) {
       clearInterval(this._readyTimer)
       this._readyTimer = null
+    }
+  }
+
+  /**
+   * 当前媒体是否带音轨。
+   *
+   * WebRTC 直接看 MediaStream：ZLM 在源流没有音频帧时会把 answer 里的 audio 段
+   * 标成 `a=inactive`，浏览器根本不建轨（`getAudioTracks()` 为空），
+   * 此时再点「取消静音」也没用 —— 界面要如实告诉用户「该通道无音频」。
+   * FLV/MSE 没有等价接口，只能看解码字节数（Chromium 的
+   * `webkitAudioDecodedByteCount` 在出过音频帧后才大于 0）。
+   *
+   * @returns {boolean} 是否检测到音轨
+   */
+  hasAudioTrack() {
+    const v = this.videoEl
+    if (!v) return false
+    if (v.srcObject && typeof v.srcObject.getAudioTracks === 'function') {
+      return v.srcObject.getAudioTracks().length > 0
+    }
+    if (typeof v.webkitAudioDecodedByteCount === 'number') {
+      return v.webkitAudioDecodedByteCount > 0
+    }
+    if (typeof v.mozHasAudio === 'boolean') {
+      return v.mozHasAudio
+    }
+    // Safari 等没有探测手段：按「有音频」处理，避免误报无音轨
+    return true
+  }
+
+  /**
+   * 起播后一段时间内轮询音轨：WebRTC 的轨由 ontrack 异步加入，
+   * 起播瞬间判一次必然误报「无音频」。
+   *
+   * @private
+   */
+  _startAudioWatch() {
+    if (this._audioTimer || this.destroyed) return
+    let ticks = 0
+    const tick = () => {
+      if (this.destroyed) {
+        this._stopAudioWatch()
+        return
+      }
+      ticks += 1
+      // 还没出画面就先别下结论：WebRTC 的 track 是 ontrack 异步塞进来的
+      if (!this.videoEl || (!this._readyFired && this.currentTime() < 0.2)) {
+        if (ticks > 120) this._stopAudioWatch()
+        return
+      }
+      const has = this.hasAudioTrack()
+      if (has !== this._audioKnown) {
+        this._audioKnown = has
+        this.onAudioChange(has)
+      }
+      // 有音频就不用再测；没有的多测 30 秒（部分设备音轨要等几个 GOP 才出数据）
+      if (has || ticks > 60) this._stopAudioWatch()
+    }
+    this._audioTimer = setInterval(tick, 500)
+  }
+
+  /** @private */
+  _stopAudioWatch() {
+    if (this._audioTimer) {
+      clearInterval(this._audioTimer)
+      this._audioTimer = null
     }
   }
 
@@ -824,18 +899,48 @@ export class LivePlayerEngine {
 
   /** 是否静音（供外部同步音量按钮）。 */
   isMuted() {
-    return this.videoEl ? this.videoEl.muted : true
+    const p = this.vjsPlayer()
+    if (p && typeof p.muted === 'function') {
+      try {
+        return !!p.muted()
+      } catch (e) {
+        // 忽略
+      }
+    }
+    return this.videoEl ? this.videoEl.muted : this.muted
   }
 
   /** 设置静音。 */
   setMuted(m) {
-    if (this.videoEl) this.videoEl.muted = !!m
+    this.muted = !!m
+    /*
+     * 优先走 video.js 的 API：直接改 video 元素的 muted 不会同步控制栏图标，
+     * 会出现「已经出声了、喇叭图标还是静音」的错觉。
+     */
+    const p = this.vjsPlayer()
+    if (p && typeof p.muted === 'function') {
+      try {
+        p.muted(!!m)
+      } catch (e) {
+        // 忽略：退到底层元素
+      }
+    }
+    if (this.videoEl) {
+      this.videoEl.muted = !!m
+      if (!m && this.videoEl.volume === 0) this.videoEl.volume = 1
+      // 解除静音后若被浏览器的自动播放策略按住，补一次 play 把画面拉回来
+      if (!m && this.videoEl.paused) {
+        const r = this.videoEl.play()
+        if (r && typeof r.catch === 'function') r.catch(() => {})
+      }
+    }
   }
 
   /** 销毁。 */
   destroy() {
     this.destroyed = true
     this._stopReadyWatchdog()
+    this._stopAudioWatch()
     if (this._ctrlObserver) {
       try {
         this._ctrlObserver.disconnect()

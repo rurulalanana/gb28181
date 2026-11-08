@@ -253,7 +253,7 @@ public class DownloadService {
         long now = System.currentTimeMillis();
         // 完成判定与自动收尾用同一套规则，避免「这里说完成了、那边还在录」
         boolean done = task.finished || shouldFinish(task, now);
-        return new Progress(task.recordedSecond(now), task.totalSecond, done, task.fileSize);
+        return new Progress(task.recordedSecond(now), task.totalSecond, done, currentBytes(task));
     }
 
     /** 全部任务快照（进行中在前，其余按开始时间倒序），供界面全局下载面板使用。 */
@@ -508,6 +508,78 @@ public class DownloadService {
         return s != null && !s.isBlank();
     }
 
+    /**
+     * 录制中的已落盘字节数：ZLM 边录边写，进度里带上它才能看出「数据在动」。
+     *
+     * <p>任务结束时 {@code fileSize} 才被填入，进行中一直显示 0 会让用户以为
+     * 下载卡死（实测 2 分钟段全程 fileSize=0）。
+     */
+    private long currentBytes(Task task) {
+        if (task.fileSize > 0) {
+            return task.fileSize;
+        }
+        RecordingService recorder = streamService == null ? null : streamService.recordingService();
+        if (recorder == null) {
+            return 0;
+        }
+        /*
+         * 录制中的条目还没有 filePath：ZLM 要等整段收尾（on_record_mp4）才回填，
+         * 所以先查索引、再退回「本次任务开始后仍在写的那个 mp4」——
+         * 不能用 newestFile（取最大文件），同目录里上一轮任务的产物更大，
+         * 会把几十 MB 的旧文件当成当前下载进度。
+         */
+        String p = recordingPath(recorder, task.recordKey);
+        if (p != null) {
+            File f = new File(p);
+            if (f.isFile()) {
+                return f.length();
+            }
+        }
+        return liveRecordingBytes(task);
+    }
+
+    /**
+     * 录制中的落盘字节数：会话目录下「最近仍在写」的 mp4。
+     *
+     * <p>ZLM 录制期间写的是<b>点开头的临时文件</b>（{@code .2026-11-08-23-28-06-0.mp4}），
+     * 收尾时才改名成正式文件 —— 排除点开头的文件就只会在下载结束时才看得到大小。
+     *
+     * @param task 下载任务（用 {@code startedAt} 排除上一轮任务的旧文件）
+     * @return 字节数；找不到返回 0
+     */
+    private long liveRecordingBytes(Task task) {
+        java.nio.file.Path dir = sessionDir(task.sessionKey);
+        if (!java.nio.file.Files.isDirectory(dir)) {
+            return 0L;
+        }
+        long bestMtime = Long.MIN_VALUE;
+        long bestSize = 0L;
+        try (var stream = java.nio.file.Files.walk(dir)) {
+            for (java.util.Iterator<java.nio.file.Path> it = stream.iterator(); it.hasNext(); ) {
+                java.nio.file.Path p = it.next();
+                if (!java.nio.file.Files.isRegularFile(p)) {
+                    continue;
+                }
+                String n = p.getFileName().toString().toLowerCase();
+                if (!n.endsWith(".mp4")) {
+                    continue;
+                }
+                long mtime = java.nio.file.Files.getLastModifiedTime(p).toMillis();
+                // 只认本次任务启动之后还在写的文件（留 10 秒余量，容器建目录有延迟）
+                if (mtime < task.startedAt - 10_000L) {
+                    continue;
+                }
+                if (mtime >= bestMtime) {
+                    bestMtime = mtime;
+                    bestSize = java.nio.file.Files.size(p);
+                }
+            }
+        } catch (Exception e) {
+            return 0L;
+        }
+        return bestSize;
+    }
+
     /** 录像索引里该键下最近一个已落盘的条目路径。 */
     private String recordingPath(RecordingService recorder, String recordKey) {
         String best = null;
@@ -614,7 +686,7 @@ public class DownloadService {
         }
         return new View(t.taskId, t.deviceId, t.channelId, t.channelName,
                 t.startAt, t.endAt, recorded, t.totalSecond, percent, t.speed,
-                t.finished, t.ok, t.fileName, t.filePath, t.fileSize, t.url, t.message,
+                t.finished, t.ok, t.fileName, t.filePath, currentBytes(t), t.url, t.message,
                 t.elapsedSecond(now));
     }
 

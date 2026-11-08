@@ -94,6 +94,14 @@
           <div ref="videoContainer" class="pb-video" />
           <div v-if="!current" class="pb-no-video">No Video</div>
           <div v-if="seeking && current" class="pb-seeking">定位中…</div>
+          <!--
+            源流没有音频帧时如实提示：ZLM 会把 WebRTC answer 的音频段标成
+            a=inactive，浏览器根本不建音轨，用户点音量按钮也永远没声音，
+            不说明就会被当成平台故障（现场多数水库球机本来就没接拾音器）。
+          -->
+          <div v-if="current && noAudio" class="pb-no-audio">
+            该通道无音频
+          </div>
         </div>
 
         <!--
@@ -279,6 +287,8 @@ const player = useLivePlayer(videoContainer)
 /** 播放区容器：列表视图点「回放」后要滚到这里（否则画面在屏幕外，看不到自己在播）。 */
 const playStage = ref(null)
 const playing = computed(() => player.playing.value)
+/** 源流没有音轨（`hasAudio` 为 `null` 是还没测出来，不能提示）。 */
+const noAudio = computed(() => player.hasAudio.value === false)
 
 const serial = computed(() => query.channelKey.split('/')[0] || '')
 const code = computed(() => query.channelKey.split('/')[1] || '')
@@ -926,7 +936,13 @@ async function downloadCurrent() {
   await startDownload(current.value)
 }
 
-/** 悬浮提示提前说明耗时与画质差异：完整≈段长；快进快但产物跳帧，不说明会被当成平台坏了。 */
+/**
+ * 悬浮提示提前说明耗时与画质差异。
+ *
+ * 实测（下级平台 34020000002000000006，2026-11）：`a=downloadspeed:4` 与
+ * `s=Download` 设备都不执行，120 秒段实耗 132 秒、产物时长 111.6 秒 ——
+ * 所以耗时只能按段长说，不能按倍速折算，否则用户会以为平台卡住。
+ */
 function downloadHint(row) {
   if (hasTaskOfRow(row)) return '该段已在后台下载，见右上角「下载任务」'
   const sec = segmentLengthOf(row)
@@ -934,8 +950,8 @@ function downloadHint(row) {
   const real = fmtDuration(sec)
   const speed = downloadSpeed.value
   if (speed > 1) {
-    return `快进下载 ${real} 的录像：设备只推关键帧，画面会跳，`
-      + `约需 ${fmtDuration(sec / speed)}（仅适合快速翻看，存档请选「完整」）`
+    return `按 ${speed} 倍速请求下载 ${real} 的录像：设备普遍不执行该倍速，`
+      + `实际仍约需 ${real}；若设备支持则更快（画质可能只推关键帧）`
   }
   return `下载 ${real} 的完整录像，约需 ${real}（后台运行，可继续浏览其它页面）`
 }
@@ -1521,6 +1537,20 @@ onUnmounted(() => {
   justify-content: center;
   color: #fff;
   font-size: 14px;
+  pointer-events: none;
+}
+
+/* 源流没有音频帧时的常驻角标（不是故障，避免用户一直找音量按钮） */
+.pb-no-audio {
+  position: absolute;
+  left: 10px;
+  bottom: 44px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #d0d0d0;
+  font-size: 12px;
+  line-height: 18px;
   pointer-events: none;
 }
 
