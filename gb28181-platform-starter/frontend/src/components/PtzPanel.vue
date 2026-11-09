@@ -2202,6 +2202,9 @@ const runningPattern = computed(() => (activeRun.value.type === 'pattern' ? acti
 /**
  * 一条巡迹是不是「没配过」的默认空条目。
  *
+ * <p><b>现在只给 {@link #newPattern} 挑空槽用</b>，不再参与「显示哪些行」的判定
+ * （那个判据只看 {@code enable}，见 {@link #configuredPatterns}）。
+ *
  * <p>设备默认名是「巡跡N」——<b>繁体「跡」</b>（实测 {@code AutoPattern[0][n].Name}
  * 返回 {@code 5de1 8de1 31} = 巡跡1，固件是繁体界面）。简体「巡迹N」和
  * {@code PatternN} 也一并认，避免换固件后判据失效。
@@ -2210,15 +2213,11 @@ const runningPattern = computed(() => (activeRun.value.type === 'pattern' ? acti
  * 平台早期用 GBK 写设备配置，把空槽的默认名写成了坏字节。设备按 UTF-8 解不出来，
  * 于是 {@code AutoPattern[0][n].Name} 变成 {@code Ѳ�E3} 这种字符串
  * （含 {@code U+FFFD} 替换字符，<b>不可逆</b>）。
+ * 它们与「空槽」等价，必须能被 {@link #newPattern} 选中复用，
+ * 否则 30 个坏槽位全被判成「已占用」，用户点「新增巡迹」会直接报「已满」。
  *
- * <p>实测后果：这台设备 32 个槽位里只有前 2 个还是 {@code Pattern1}/{@code Pattern2}，
- * 第 3~32 个全成了 {@code Ѳ�E3}…{@code Ѳ�E32}。它们 {@code Enable=false}（从没录过），
- * 但名称既不是默认名也不是空串，被当成「已配置」全部显示出来 ——
- * 界面上一片空白巡迹，用户以为平台凭空造了 30 条数据。
- *
- * <p>判据：名称里带 {@code U+FFFD}（{@code \uFFFD}）就说明它是解码失败的残留，
- * 与「空槽」等价。正常的中文名不会包含这个字符 —— 它是 UTF-8 解码器
- * 遇到非法字节时的占位符，只会出现在数据已经损坏的场合。
+ * <p>判据：名称里带 {@code U+FFFD} 就说明它是解码失败的残留 ——
+ * 正常的中文名不会包含这个字符，它是 UTF-8 解码器遇到非法字节时的占位符。
  */
 function isPatternDefaultName(row) {
   const name = (row.name || '').trim()
@@ -2232,28 +2231,37 @@ function isPatternDefaultName(row) {
 /**
  * 只显示「已配置」的巡迹。
  *
- * <p><b>主判据是 {@code enable}</b>：设备 {@code AutoPattern[ch][idx].Enable=true}
- * 表示「这条巡迹录过内容」，设备自己的「巡跡」页列表就按它筛。
- * 实测该字段走 CGI 读是可靠的（空槽 false、录过的 true）。
+ * <p><b>判据与设备完全一致：只看 {@code Enable}</b>。
+ * 设备 {@code AutoPattern[ch][idx].Enable=true} 表示「这条巡迹录过内容」，
+ * 设备自己的「巡跡」页列表就按它筛 —— {@code Enable=false} 的槽位在设备界面上
+ * 根本不存在，平台也不该显示。
  *
- * <p>⚠️ 早期这里<b>只按名称判断</b>，于是「录过但没改名字」的巡迹
- * （例如默认名「巡跡2」+ Enable=true）被当成空槽隐藏掉 ——
- * 表现就是「设备上有两条，平台只显示一条」。
- *
- * <p>另外两种也要显示：
+ * <p>另外两种也要显示，因为它们代表「用户正在进行中的操作」：
  * <ul>
  *   <li>本次会话里刚点「新增巡迹」的行（{@code isNew}）；</li>
- *   <li>改过名字但还没录的行 —— 名称已经真的写进设备了，
- *       不显示会让「新增 + 改名 + 保存」看起来凭空消失。</li>
+ *   <li>正在录制 / 正在运行的那一条（设备状态还没回写，但用户要知道它在跑）。</li>
  * </ul>
+ *
+ * <h3>为什么<b>不</b>用「名称不是默认名」作为判据</h3>
+ * 早期这里还有一条 {@code return !isPatternDefaultName(p)}，本意是显示
+ * 「新增 + 改名 + 保存」的行。但它会连带把<b>设备上本来就有的脏名</b>显示出来：
+ * <pre>
+ *   AutoPattern[0][31].Name = "测试巡迹中文"   Enable = false
+ * </pre>
+ * 这条在设备界面上根本看不到（Enable=false），平台上却冒出来一行 ——
+ * 用户会问「设备上没有这条，平台哪来的 32」。
+ *
+ * <p>而那条规则想覆盖的场景其实<b>不需要它</b>：{@link #savePattern} 保存后会
+ * 调 {@code loadPtzExt()} 重读配置，改过名的行读回来时名称就是新名字，
+ * 而它仍然 {@code Enable=false}。要让这种行可见，靠的是 {@code isNew}
+ * 在保存后继续保留（见 {@link #savePattern} 的处理），不是靠名称判据。
  */
 const configuredPatterns = computed(() =>
   patternRows.value.filter((p) => {
     if (p.isNew) return true
     if (recordingPattern.value === p.patternId) return true
     if (runningPattern.value === p.patternId) return true
-    if (p.enable) return true
-    return !isPatternDefaultName(p)
+    return p.enable
   })
 )
 
@@ -2267,8 +2275,23 @@ const PATTERN_STAY_MIN = 0
 const PATTERN_STAY_MAX = 3600
 const PATTERN_STAY_DEFAULT = 15
 
-/** 把设备返回的巡迹灌进表格行。 */
+/**
+ * 把设备返回的巡迹灌进表格行。
+ *
+ * <p><b>保留「本次会话新建」的标记</b>：用户点「新增巡迹」→ 改名字 → 保存，
+ * 保存后这里会重新灌一次数据。此时该行从设备读回来仍然是
+ * {@code Enable=false}（没录制过内容），如果无脑把 {@code isNew} 重置成 false，
+ * 这一行就会从列表里消失 —— 用户看到的正是「新增、改名、保存，然后它没了」。
+ *
+ * <p>{@link #configuredPatterns} 的判据是「{@code isNew} 或 {@code enable}」，
+ * 所以只要保住 {@code isNew}，这一行就会继续显示，直到用户真的把它录出来
+ * （那时 {@code enable} 变 true，不再需要 {@code isNew}）或刷新页面。
+ */
 function fillPatterns(patterns) {
+  // 记下当前哪些槽位是本次会话新建的，重读后要还原
+  const newOnes = new Set(
+    patternRows.value.filter((p) => p.isNew).map((p) => p.patternId)
+  )
   patternRows.value = (patterns || []).map((p) => ({
     patternId: p.patternId,
     name: p.name || '',
@@ -2278,7 +2301,8 @@ function fillPatterns(patterns) {
      * 设备对未改过的槽位一律返回 15000ms = 15s，所以拿不到时也用 15。
      */
     staySeconds: p.staySeconds ?? 0,
-    isNew: false
+    // 已经录出内容的行不再需要「新建」标记
+    isNew: !p.enable && newOnes.has(p.patternId)
   }))
 }
 
