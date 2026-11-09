@@ -96,9 +96,13 @@ public class DahuaConfiguration {
      */
     @Bean
     @ConditionalOnProperty(prefix = "dahua.server-mode", name = "enabled", havingValue = "true")
-    public RegisterListener dahuaRegisterListener(DahuaRegisterTable table, DahuaProperties props,
-                                                 io.github.rurulalanana.starter.service.DeviceService deviceService) {
-        return new DahuaRegisterListener(table, serverLoginHandler(props, deviceService));
+    public RegisterListener dahuaRegisterListener(
+            DahuaRegisterTable table, DahuaProperties props,
+            io.github.rurulalanana.starter.service.DeviceService deviceService,
+            org.springframework.beans.factory.ObjectProvider<
+                    io.github.rurulalanana.starter.service.DeviceProvisionService> provisionService) {
+        return new DahuaRegisterListener(table,
+                serverLoginHandler(props, deviceService, provisionService));
     }
 
     /**
@@ -119,7 +123,9 @@ public class DahuaConfiguration {
      * 行为退回「只记账」，设备重连频率升高但功能不受影响。
      */
     private static DahuaRegisterListener.Handler serverLoginHandler(
-            DahuaProperties props, io.github.rurulalanana.starter.service.DeviceService deviceService) {
+            DahuaProperties props, io.github.rurulalanana.starter.service.DeviceService deviceService,
+            org.springframework.beans.factory.ObjectProvider<
+                    io.github.rurulalanana.starter.service.DeviceProvisionService> provisionService) {
         DahuaProperties.ServerMode sm = props.getServerMode();
         if (!sm.isAutoProvision()) {
             return null;
@@ -186,7 +192,7 @@ public class DahuaConfiguration {
                  *
                  * 失败不能影响注册流程本身（这条连接已经建好了），只记日志。
                  */
-                markOnlineQuietly(deviceService, serial);
+                markOnlineQuietly(deviceService, provisionService, serial);
             }
         };
     }
@@ -200,8 +206,21 @@ public class DahuaConfiguration {
      * <p>任何异常都吞掉：注册会话已经建立，数据库写入失败不该反过来影响它。
      */
     private static void markOnlineQuietly(
-            io.github.rurulalanana.starter.service.DeviceService deviceService, String serial) {
+            io.github.rurulalanana.starter.service.DeviceService deviceService,
+            org.springframework.beans.factory.ObjectProvider<
+                    io.github.rurulalanana.starter.service.DeviceProvisionService> provisionService,
+            String serial) {
         try {
+            /*
+             * 先登记「这个 SN 走过主动注册」。必须无条件执行（哪怕设备还没纳管）：
+             * 它决定巡检能否用「按档案地址直连失败」来判离线 ——
+             * 注册过的设备档案地址是 NAT 出口，直连必然失败，那个结果没有判定意义。
+             */
+            io.github.rurulalanana.starter.service.DeviceProvisionService ps =
+                    provisionService.getIfAvailable();
+            if (ps != null) {
+                ps.noteRegistered(serial);
+            }
             if (deviceService.findDevice(serial) == null) {
                 // 还没纳管：交给 DahuaAutoProvisionRunner 建档，这里写状态会写空
                 return;

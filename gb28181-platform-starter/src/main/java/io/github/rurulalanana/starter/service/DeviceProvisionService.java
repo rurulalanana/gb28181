@@ -47,6 +47,18 @@ public class DeviceProvisionService {
     private final DeviceRegisterRegistry registerRegistry;
 
     /**
+     * 曾经通过主动注册出现过的 SN。
+     *
+     * <p>只增不减，进程重启后从空开始 —— 这不影响正确性：重启后设备会重新注册一次
+     * （实测每次平台重启后 1 分钟内必到），在那之前即使被误判一次离线，
+     * 注册到达后 {@code markOnlineQuietly} 会立刻纠正。
+     *
+     * <p>用 {@link java.util.concurrent.ConcurrentHashMap} 存而不是普通 Set：
+     * 注册回调在 SDK 的 IO 线程上、巡检在调度线程上，两者并发访问。
+     */
+    private final java.util.Set<String> registeredSerials = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
      * 纳管一台 SDK 直连设备。
      *
      * <p>只落设备行，<b>不立即拉目录</b> —— 调用方通常在纳管后马上要返回、
@@ -212,8 +224,17 @@ public class DeviceProvisionService {
      * 连不上只说明「我没有那条连接」，不构成设备离线的证据；
      * 真正的离线由持有会话的实例在会话失效后判定。
      *
+     * <h3>还有一条更隐蔽的空窗：注册会话尚未建立的那几十秒</h3>
+     * 设备重启 / 平台重启后，设备要过一会儿才重新主动注册。
+     * 这段空窗里 {@link #contextOf} 在注册表查不到它，会退化成 CLIENT 模式，
+     * 于是按 {@code remote_ip:37777} 直连 —— 而那是 NAT 出口地址，必然失败，
+     * 就把一台完全正常的设备写成离线。
+     * <p>所以还要区分「这台设备的档案地址本来就不可达」与「设备真的离线」：
+     * 只要该 SN <b>曾经通过主动注册出现过</b>（记在 {@link #registeredSerials}），
+     * 就说明它的接入方式是 SERVER，CLIENT 直连失败没有判定意义。
+     *
      * @return 设备当前是否在线；设备不存在、实现缺失、
-     *         或 SERVER 模式下无法确认时返回 {@code false}
+     *         或无法确认时返回 {@code false}
      */
     public boolean probeOnly(String deviceId) {
         GbDevice device = deviceService.findDevice(deviceId);
@@ -241,19 +262,102 @@ public class DeviceProvisionService {
             log.debug("SDK 设备探测异常: {} {}", deviceId, e.toString());
             online = false;
         }
-        if (!online && ctx.connectMode() == ConnectMode.SERVER) {
-            /*
-             * SERVER 模式 = 该 SN 此刻在注册表里，说明设备正主动注册着。
-             * 探测却失败，最可能是我这个实例没有那条会话（另一实例持有），
-             * 或者会话刚失效。两种情况都不该由我把它写成离线 ——
-             * 前者会覆盖掉正确值，后者下一轮自然会被判出来。
-             */
-            log.debug("SDK 设备探测失败但处于 SERVER 模式，保留原在线状态: {} {}", deviceId, ctx);
+        if (online) {
+            deviceService.setDeviceAndChannelsStatus(deviceId, true);
+            return true;
+        }
+        if (!cannotJudgeOffline(device, ctx)) {
+            // 这个观察点看不到它，且证据足以判定离线（纯局域网直连部署）
+            deviceService.setDeviceAndChannelsStatus(deviceId, false);
             return false;
         }
-        deviceService.setDeviceAndChannelsStatus(deviceId, online);
-        return online;
+        /*
+         * 探测失败但不足以判定离线。
+         *
+         * <p>SERVER 模式下还有一层：注册表里查得到它，这本身就是比探测更强的
+         * 存活证据 —— 设备刚把连接交到我们手上。此时应当<b>主动置为在线</b>，
+         * 而不是「保留原状」：如果原状是离线（上一轮被别的实例写坏），
+         * 保留就等于让错误状态一直显示。
+         */
+        if (ctx.connectMode() == ConnectMode.SERVER) {
+            deviceService.setDeviceAndChannelsStatus(deviceId, true);
+            return true;
+        }
+        log.debug("SDK 设备探测失败但不足以判定离线，保留原状态: {} {}", deviceId, ctx);
+        return false;
     }
+
+    /**
+     * 探测失败时，是否<b>不足以</b>判定设备离线。
+     *
+     * <p>核心思想：<b>「我这个观察点看不到它」不等于「它离线了」</b>。
+     * 一台设备可能被多个平台实例同时纳管，只有持有主动注册会话的那个能连上，
+     * 其余实例按档案地址直连必然失败（那是 NAT 出口地址，从外部不可达）。
+     * 让这些实例写 {@code online=false}，就会与持有会话的实例互相覆盖。
+     *
+     * <p>分三种情况：
+     * <ol>
+     *   <li><b>SERVER 模式</b>（注册表里查得到它）：设备正主动注册着，
+     *       这是比任何探测都强的存活证据 —— 永不判离线。
+     *       探测失败只说明「我没拿到那条会话」，与设备状态无关。</li>
+     *   <li><b>CLIENT 模式 + 曾主动注册过</b>：档案地址是 NAT 出口、本来就不可直连，
+     *       直连失败没有判定意义。<b>但不能永远不判</b> —— 设备真断电后没人刷新
+     *       {@code keepalive_time}，所以用一个较长的窗口兜底（见
+     *       {@link #STALE_AFTER_SECONDS}）。</li>
+     *   <li><b>CLIENT 模式 + 从未注册过</b>：纯局域网直连部署，
+     *       直连失败就是离线的可靠证据。</li>
+     * </ol>
+     *
+     * @return {@code true} 表示证据不足，应保留原状态
+     */
+    private boolean cannotJudgeOffline(GbDevice device, DeviceContext ctx) {
+        return cannotJudgeOffline(ctx.connectMode(),
+                registeredSerials.contains(device.getDeviceId()),
+                device.getKeepaliveTime(), LocalDateTime.now());
+    }
+
+    /**
+     * {@link #cannotJudgeOffline(GbDevice, DeviceContext)} 的纯函数版本。
+     *
+     * <p>抽出来是为了能单测：这段逻辑决定「界面显示在线还是离线」，
+     * 而它踩过的坑（多实例互相覆盖、重连空窗误判）都不是一眼能看出来的。
+     *
+     * @param mode          本次探测用的接入模式
+     * @param everRegistered 本进程内是否见过该 SN 主动注册
+     * @param lastSeen      最后一次确认在线的时间，可为 {@code null}
+     * @param now           当前时间
+     * @return {@code true} 表示证据不足，应保留原状态
+     */
+    static boolean cannotJudgeOffline(ConnectMode mode, boolean everRegistered,
+                                      LocalDateTime lastSeen, LocalDateTime now) {
+        if (mode == ConnectMode.SERVER) {
+            // 注册表里有它 = 设备正主动注册着，比任何探测都强的存活证据
+            return true;
+        }
+        if (!everRegistered) {
+            // 纯局域网直连部署：直连失败就是离线
+            return false;
+        }
+        if (lastSeen == null) {
+            /*
+             * 走过主动注册、但库里还没写过一次「在线」。
+             * 典型场景：平台刚重启，本进程刚收到注册（内存记下了），
+             * 但 keepalive_time 还是空。此时直连必然失败（NAT 出口），
+             * 判离线只会让界面在重启后立刻闪一下离线。
+             */
+            return true;
+        }
+        return lastSeen.isAfter(now.minusSeconds(STALE_AFTER_SECONDS));
+    }
+
+    /**
+     * 「曾主动注册过的设备」在 CLIENT 模式下判离线的时间窗口（秒）。
+     *
+     * <p>这类设备的档案地址不可直连，只能靠 {@code keepalive_time} 判断死活。
+     * 取 5 分钟：既跨得过设备重连的抖动（实测平台重启后约 1 分钟内重新注册），
+     * 又不会让「设备真断电」的界面迟迟不更新。
+     */
+    private static final long STALE_AFTER_SECONDS = 300L;
 
     /**
      * 设备记录 → 接入上下文。
@@ -288,6 +392,7 @@ public class DeviceProvisionService {
         if (DeviceKind.of(d.getSource()) != DeviceKind.GB28181) {
             DeviceRegisterTable.RegisteredDevice live = registerRegistry.lookupAny(d.getDeviceId());
             if (live != null) {
+                registeredSerials.add(d.getDeviceId());
                 return new DeviceContext(d.getDeviceId(),
                         live.ip(), live.port(),
                         d.getUsername(), d.getPassword(),
@@ -301,6 +406,21 @@ public class DeviceProvisionService {
                 d.getUsername(),
                 d.getPassword(),
                 channelTotal);
+    }
+
+    /**
+     * 登记「这个 SN 通过主动注册出现过」。
+     *
+     * <p>由主动注册登录成功后的回调调用（见 {@code DahuaConfiguration}）。
+     * 记下来之后，即使注册会话短暂消失（设备重连空窗），
+     * {@link #probeOnly} 也不会因为「按档案地址直连失败」而把设备判成离线。
+     *
+     * @param serial 设备序列号
+     */
+    public void noteRegistered(String serial) {
+        if (serial != null && !serial.isBlank()) {
+            registeredSerials.add(serial);
+        }
     }
 
     private static String trimToNull(String s) {
