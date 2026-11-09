@@ -200,7 +200,20 @@ public class DeviceProvisionService {
      * 实测直接触发 PostgreSQL {@code deadlock detected}。
      * 状态写入交给 {@code setDeviceAndChannelsStatus}（它自带短事务）。
      *
-     * @return 探测是否成功；设备不存在或实现缺失时返回 {@code false}
+     * <h3>「连不上」不等于「离线」—— 只在 CLIENT 模式下才敢判离线</h3>
+     * 一台设备可能被<b>多个平台实例</b>同时纳管（共库部署，或排障时本地起了
+     * 一份连生产库的实例）。此时只有<b>持有主动注册会话的那个实例</b>能连上设备，
+     * 其余实例按 {@code gb_device.remote_ip:remote_port} 直连必然失败 ——
+     * 那是设备的 NAT 出口地址，从外部不可达。
+     * <p>实测症状：两个实例各跑一次 60 秒巡检，一个写 {@code online=true}
+     * （注册会话探测成功）、另一个 20 秒后写 {@code online=false}，
+     * 库里 {@code online} 每分钟翻转两次，界面一直显示离线。
+     * <p>因此：<b>SERVER 模式探测失败时保持原状</b>（既不改 true 也不改 false）——
+     * 连不上只说明「我没有那条连接」，不构成设备离线的证据；
+     * 真正的离线由持有会话的实例在会话失效后判定。
+     *
+     * @return 设备当前是否在线；设备不存在、实现缺失、
+     *         或 SERVER 模式下无法确认时返回 {@code false}
      */
     public boolean probeOnly(String deviceId) {
         GbDevice device = deviceService.findDevice(deviceId);
@@ -227,6 +240,16 @@ public class DeviceProvisionService {
             // 探测失败是现场常态（设备断电、网络抖动），不能把巡检循环打挂
             log.debug("SDK 设备探测异常: {} {}", deviceId, e.toString());
             online = false;
+        }
+        if (!online && ctx.connectMode() == ConnectMode.SERVER) {
+            /*
+             * SERVER 模式 = 该 SN 此刻在注册表里，说明设备正主动注册着。
+             * 探测却失败，最可能是我这个实例没有那条会话（另一实例持有），
+             * 或者会话刚失效。两种情况都不该由我把它写成离线 ——
+             * 前者会覆盖掉正确值，后者下一轮自然会被判出来。
+             */
+            log.debug("SDK 设备探测失败但处于 SERVER 模式，保留原在线状态: {} {}", deviceId, ctx);
+            return false;
         }
         deviceService.setDeviceAndChannelsStatus(deviceId, online);
         return online;

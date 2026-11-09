@@ -176,8 +176,40 @@ public class DahuaConfiguration {
             } else {
                 log.info("主动注册会话已建立: sn={} {}:{} 通道数={}",
                         serial, ip, port, session.channelCount());
+                /*
+                 * 注册成功就是「设备此刻在线」的直接证据，立即落库。
+                 *
+                 * 【为什么不能只等下一轮探测】巡检是 60 秒一轮，而设备重连后
+                 * 若恰好在探测之后、下一轮之前，界面会有最多 60 秒的「在线但显示离线」。
+                 * 更要紧的是：注册是设备主动送上门的最强信号，
+                 * 丢掉它就只能靠「能不能连上」这种弱信号去推断。
+                 *
+                 * 失败不能影响注册流程本身（这条连接已经建好了），只记日志。
+                 */
+                markOnlineQuietly(deviceService, serial);
             }
         };
+    }
+
+    /**
+     * 主动注册成功后立即把设备标记为在线。
+     *
+     * <p>只更新在线状态与通道，不碰地址/凭据 —— 那些由纳管流程负责，
+     * 在这里改会让「设备档案里配的地址」被注册连接的临时地址覆盖。
+     *
+     * <p>任何异常都吞掉：注册会话已经建立，数据库写入失败不该反过来影响它。
+     */
+    private static void markOnlineQuietly(
+            io.github.rurulalanana.starter.service.DeviceService deviceService, String serial) {
+        try {
+            if (deviceService.findDevice(serial) == null) {
+                // 还没纳管：交给 DahuaAutoProvisionRunner 建档，这里写状态会写空
+                return;
+            }
+            deviceService.setDeviceAndChannelsStatus(serial, true);
+        } catch (Exception e) {
+            log.warn("主动注册后更新在线状态失败（不影响注册会话）: sn={} {}", serial, e.getMessage());
+        }
     }
 
     /**
