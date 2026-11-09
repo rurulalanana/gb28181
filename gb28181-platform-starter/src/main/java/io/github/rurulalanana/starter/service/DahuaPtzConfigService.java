@@ -873,19 +873,28 @@ public class DahuaPtzConfigService {
                 }
             }
             /*
-             * 空线也返回：UI 需要知道「这条线号可用但还没配点」。
+             * 名称<b>不再</b>做乱码修复。
              *
-             * <p>名称要过一遍乱码修复：实测这台设备把未配置线（3~32）的名称存成了
-             * 「宸¤埅缇ょ祫3」—— 它是「巡航群組3」的 UTF-8 字节被按 GBK 解的结果。
-             * 不修的话界面上会出现一片乱码，而且前端「按名称是否等于默认名」
-             * 判断空线的逻辑会因此<b>把 32 条空线全部当成已配置</b>显示出来
-             * （用户看到的就是「只配了 2 条却列出 32 条」）。
+             * <p>历史：这台设备把未配置线（3~32）的名称存成「宸¤埅缇ょ祫3」，
+             * 那是「巡航群組3」的 UTF-8 字节被按 GBK 解的结果，
+             * 当时在平台侧加了一个启发式的「反向乱码修复」来还原。
+             *
+             * <p>根因已在读取侧修掉，两层都改了：
+             * <ul>
+             *   <li>SDK 通路 decodeName：严格 UTF-8 优先、失败回退 GBK</li>
+             *   <li>CGI 通路 decodeBody：同样先取字节再判编码，
+             *       不再用宽松解码把非法字节换成 U+FFFD</li>
+             * </ul>
+             * 现在读回来的就是正确文本，再「修」一次反而有风险 ——
+             * 修复函数对任何中文都能按 GBK 编回去，属于启发式改写，
+             * 判据一旦命中就会把正常名字改坏。
+             *
+             * <p>写入侧也同步改成 UTF-8（DahuaExtAccess.writeRaw），
+             * 新写进去的名字与设备自己写的一致，不会再产生新的坏数据。
              */
             String name = names.get(route);
             if (name == null || name.isBlank()) {
                 name = "巡航群組" + (route + 1);
-            } else {
-                name = io.github.rurulalanana.starter.common.CharsetFix.repairUtf8AsGbk(name);
             }
             tours.add(new Tour(route + 1, name,
                     enables.getOrDefault(route, false), pts));

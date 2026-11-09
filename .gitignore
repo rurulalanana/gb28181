@@ -95,3 +95,10 @@ __pycache__/
 
 # ---------- 本地协作临时单据 ----------
 SESSION-SYNC.md
+
+# ---------- 原生库运行时解压目录 ----------
+# SDK 启动时把 jar 内的原生库解压到工作目录 lib/（见 HikvisionNativeLibrary：
+# 海康的 .so/.dll 必须落在 user.dir/lib 才能被 dlopen/LoadLibrary 找到）。
+# 这些是构建产物，来源已在 sdk-hikvision/lib/、sdk-dahua/lib/ 由 LFS 管理，
+# 这里再提交一份只会让仓库翻倍，且不同平台的文件会互相覆盖。
+gb28181-platform-starter/lib/

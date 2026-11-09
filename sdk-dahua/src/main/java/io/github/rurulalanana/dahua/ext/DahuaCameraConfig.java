@@ -205,26 +205,31 @@ public final class DahuaCameraConfig {
             new Option("7200", "2 小时"));
 
     /**
-     * 背光模式（Web 界面下拉：<b>關閉 / 背光補償 / 強光抑制 / 寬動態</b>）。
+     * 背光模式（设备 Web 界面「背光」页的下拉，<b>只有三项</b>）。
      *
-     * <p>抓 {@code RPC2 set} 与设备 CGI 双重验证的四项取值：關閉={@code Off}、
-     * 背光補償={@code Backlight}、強光抑制={@code GlareInhibition}、
-     * 寬動態={@code WideDynamic}。
+     * <p>逐项在设备界面点选 + 抓 {@code RPC2 set} 验证（DH-SD49425DB-HNY-GQ-EAU /
+     * fw 3.201.0000007.1.R）：
+     * <pre>
+     *   關閉      → Mode=Off
+     *   背光補償  → Mode=Backlight
+     *   強光抑制  → Mode=GlareInhibition
+     * </pre>
      *
-     * <p><b>宽动态曾一度被误删</b>：当时往 {@code Mode} 写 {@code WideDynamic}
-     * 全部返回 {@code Bad Request}，于是判定「设备不支持」。真正原因是当时
-     * 透雾被留在了非法值上，而设备规则是<b>透雾开启时不允许背光补偿</b>——
-     * 把透雾改回关闭后，{@code WideDynamic} 一次写入成功。
-     * 写背光模式若被拒，先查透雾是否还开着。
+     * <p><b>不要加「寬動態」</b>。底层字段确实接受 {@code Mode=WideDynamic} 并原样回读，
+     * 但设备界面这一页的下拉里<b>没有这一项</b> —— 能写不等于界面有入口。
+     * 早期把「字段可写」当成「功能可用」，于是在界面上造出了设备本身没有的选项。
      *
-     * <p>联动：选「背光补偿」出现「区域（预设/自定义）」与「强度」；
-     * 选「强光抑制」出现强度滑块；选「宽动态」出现宽动态范围滑块。
+     * <p>下级控件（实测）：
+     * <ul>
+     *   <li>關閉 → 无</li>
+     *   <li>背光補償 → 「自訂」开关</li>
+     *   <li>強光抑制 → 强度滑块（{@code GlareInhibition}）</li>
+     * </ul>
      */
     private static final List<Option> OPT_BACKLIGHT = List.of(
             new Option("Off", "关闭"),
             new Option("Backlight", "背光补偿"),
-            new Option("GlareInhibition", "强光抑制"),
-            new Option("WideDynamic", "宽动态"));
+            new Option("GlareInhibition", "强光抑制"));
 
     /**
      * 白平衡模式（Web 界面下拉，按设备实际顺序）。
@@ -566,25 +571,27 @@ public final class DahuaCameraConfig {
             new Option("2", "高"));
 
     /**
-     * 背光补偿的「預設 / 自訂」选择（{@code BacklightMode}）。
+     * 背光补偿的「自訂」开关（{@code BacklightMode}）。
      *
-     * <p><b>这里曾经错绑到 {@code IntensityMode}，那是这台设备上「无效」的根因。</b>
-     * 逐项对照设备自己的 CGI 验证（SN 10001 / fw 3.201.0000007.1.R）：
+     * <p><b>「开」的值是 {@code Region}，不是 {@code Custom}。</b>
+     * 这是抓设备界面自己的 {@code RPC2 configManager.setTemporaryConfig} 得到的：
      * <pre>
-     *   VideoInBacklight[0][n].Mode          = Off | Backlight | GlareInhibition | WideDynamic
-     *   VideoInBacklight[0][n].BacklightMode = Default | Custom      ← 「預設 / 自訂」
-     *   VideoInBacklight[0][n].BacklightRegion[0..3] = 自定义区域矩形（3096,3096,5096,5096）
-     *   VideoInBacklight[0][n].Intensity     = 0~100 背光补偿强度
-     *   VideoInBacklight[0][n].IntensityMode = Enable | Disable      ← 只是 Intensity 的使能位
+     *   开关关闭 → {"BacklightMode":"Default", "Mode":"Backlight"}
+     *   开关打开 → {"BacklightMode":"Region",  "Mode":"Backlight"}
      * </pre>
-     * {@code IntensityMode} 写进去设备确实会变、也会回读成功，但它只控制
-     * 「强度值是否参与运算」，界面上没有对应的可见效果 —— 用户拨动开关后画面毫无变化，
-     * 于是判定「自定义开关无效」。真正决定背光补偿用不用自定义区域的
-     * 是 {@code BacklightMode}，配合 {@code BacklightRegion} 才生效。
+     * 早期写的是 {@code Custom}，设备虽然接受并回读成功，
+     * 但<b>设备界面的开关不会亮</b> —— 这就是「自定义开关无效」的真正原因。
+     *
+     * <p>另一条错路：曾把这个开关绑到 {@code IntensityMode}（Enable/Disable）。
+     * 那个字段确实存在且可写，但它是 {@code Intensity} 的使能位，
+     * 与「是否使用自定义区域」无关，拨动后画面没有任何可见变化。
+     *
+     * <p>{@code BacklightRegion[0..3]} 是自定义区域的四个归一化坐标
+     * （本机为 3096/3096/5096/5096，0~8191）。设备用画面拖框设置，
+     * 纯数字输入用户无法凭肉眼填对，所以平台侧<b>不暴露</b>这四项。
      */
-    private static final List<Option> OPT_BACKLIGHT_AREA = List.of(
-            new Option("Default", "预设"),
-            new Option("Custom", "自定义"));
+    private static final String BACKLIGHT_AREA_ON = "Region";
+    private static final String BACKLIGHT_AREA_OFF = "Default";
 
     /**
      * 聚焦灵敏度（Web 界面下拉：高 / 預設值 / 低）。
@@ -821,42 +828,28 @@ public final class DahuaCameraConfig {
 
             /*
              * —— 背光（VideoInBacklight）——
-             * 设备这一页只有「模式」，但不同模式会带出不同下级：
-             *   关闭        → 无
-             *   背光补偿    → 「区域（预设/自定义）」+「强度」
-             *   强光抑制    → 强度滑块（GlareInhibition）
-             *   宽动态      → 宽动态范围滑块（WideDynamicRange）
              *
-             * <p>「自定义」原本错绑到 {@code IntensityMode}，那只是 Intensity 的使能位，
-             * 拨动后画面没有任何可见变化，用户因此判定「开关无效」。
-             * 真正的「預設 / 自訂」是 {@code BacklightMode}，配合 {@code BacklightRegion}。
+             * 控件与设备 Web 界面「圖像屬性 → 背光」页<b>一一对应</b>：
+             *   模式        下拉，恒显示           → Mode
+             *   自訂        开关，仅「背光补偿」   → BacklightMode = Region / Default
+             *   强度        滑块，仅「强光抑制」   → GlareInhibition
              *
-             * <p>{@code BacklightRegion} 是自定义区域的<b>四个坐标</b>
-             * （{@code BacklightRegion[0..3]}，这台 IPC 上是 3096/3096/5096/5096
-             * 这种 0~8191 的归一化值），不是「下限/上限」那种二元范围。
-             * 设备 Web 界面用画面拖框设置，纯数字输入用户无法凭肉眼填对，
-             * 所以平台侧<b>不暴露</b>这四项，避免改错反而把区域弄乱。
+             * <p><b>不要再往这一组里加控件。</b>底层字段 {@code Intensity} /
+             * {@code IntensityMode} / {@code WideDynamicRange} 设备都存、也都可写，
+             * 但设备界面这一页<b>没有它们的入口</b>。平台跟着设备走，不替厂商设计界面 ——
+             * 早期就是把「字段可写」当成「功能可用」，造出了强度、宽动态范围等设备本身
+             * 没有的控件，用户一眼就能看出是假的。
              */
             en("backlightMode", "背光模式", GROUP_BACKLIGHT, "VideoInBacklight",
                     List.of("Mode"), OPT_BACKLIGHT),
-            enDep("backlightArea", "区域", GROUP_BACKLIGHT, "VideoInBacklight",
-                    List.of("BacklightMode"), OPT_BACKLIGHT_AREA,
+            // 「自訂」是开关不是下拉：设备界面就是一个 switch，
+            // 底层存的是字符串 Region/Default，所以用 boolOf 做双向映射。
+            boolDep("backlightArea", "自訂", GROUP_BACKLIGHT, "VideoInBacklight",
+                    List.of("BacklightMode"), BACKLIGHT_AREA_ON, BACKLIGHT_AREA_OFF,
                     "backlightMode", List.of("Backlight")),
-            numDep("backlightIntensity", "强度", GROUP_BACKLIGHT, "VideoInBacklight",
-                    List.of("Intensity"), 0, 100, "backlightMode", List.of("Backlight")),
+            // 强光抑制的强度滑块。设备界面上它只在这个模式下出现。
             numDep("glareInhibition", "强度", GROUP_BACKLIGHT, "VideoInBacklight",
                     List.of("GlareInhibition"), 0, 100, "backlightMode", List.of("GlareInhibition")),
-            /*
-             * 宽动态范围：选「宽动态」后才出现的 0-100 滑块。
-             *
-             * <p>这是数据面真正的强度旋钮，底层字段 {@code WideDynamicRange} 独立于
-             * {@code Mode} —— 抓 RPC2 验证：把 Mode 改成 WideDynamic 时这个值不变，
-             * 单独拖滑块才写它。早期只做了模式下拉、漏了这一项，
-             * 表现就是「能选宽动态，但没法调强弱」。
-             */
-            numDep("wideDynamicRange", "宽动态范围", GROUP_BACKLIGHT, "VideoInBacklight",
-                    List.of("WideDynamicRange"), 0, 100,
-                    "backlightMode", List.of("WideDynamic")),
 
             /*
              * —— 白平衡（VideoInWhiteBalance）——
@@ -1024,6 +1017,20 @@ public final class DahuaCameraConfig {
         return new Param(key, label, group, cmd, fields, Type.BOOLEAN,
                 List.of(new Option(onValue, "开"), new Option(offValue, "关")),
                 null, null, "开 / 关", false, null, List.of());
+    }
+
+    /**
+     * 带联动的「开关 ↔ 字符串」布尔项：上级参数满足条件时才显示。
+     *
+     * <p>用在「背光补偿」下的「自訂」开关上 —— 设备界面只在模式选了
+     * 「背光補償」时才显示它。
+     */
+    private static Param boolDep(String key, String label, String group, String cmd,
+                                 List<String> fields, String onValue, String offValue,
+                                 String dependsOn, List<String> dependsValues) {
+        return new Param(key, label, group, cmd, fields, Type.BOOLEAN,
+                List.of(new Option(onValue, "开"), new Option(offValue, "关")),
+                null, null, "开 / 关", false, dependsOn, dependsValues);
     }
 
     /**

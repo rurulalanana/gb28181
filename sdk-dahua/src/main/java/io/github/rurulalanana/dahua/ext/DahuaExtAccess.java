@@ -464,7 +464,24 @@ public final class DahuaExtAccess {
      */
     public boolean writeRaw(DahuaSdk.Session session, String command, int channel, String payload) {
         NetSDKLib sdk = requireSdk();
-        byte[] data = payload.getBytes(GBK);
+        /*
+         * 必须写 UTF-8，不能写 GBK。
+         *
+         * 实测（DH-SD49425DB-HNY-GQ-EAU / fw 3.201.0000007.1.R）：
+         * 设备自己的 Web 界面写巡航组名走 configManager.setTemporaryConfig，
+         * 落盘的字节是 UTF-8 —— 读 PtzTour[0][2].Name 得到
+         *   E5 B7 A1 E8 88 AA E7 BE A4 E7 B5 84  ("巡航群組3")
+         * 而平台早期这里用 GBK 写，同一字段落盘成
+         *   D1 B2 BA BD C8 BA BD                    ("巡航群組1" 的 GBK)
+         * 设备界面按 UTF-8 解，于是显示成「Ѳ��Ⱥ�M1」这种乱码。
+         *
+         * 判据很硬：GBK 字节几乎不可能通过严格 UTF-8 校验，
+         * 而 UTF-8 字节按 GBK 解一定得到乱码。所以「设备里存的是 UTF-8」
+         * 与「设备界面按 UTF-8 显示」是同一件事，写入必须对齐。
+         *
+         * 对纯 ASCII（绝大多数字段）两种编码字节完全相同，不受影响。
+         */
+        byte[] data = payload.getBytes(StandardCharsets.UTF_8);
         IntByReference error = new IntByReference(0);
         IntByReference restart = new IntByReference(0);
         boolean ok = sdk.CLIENT_SetNewDevConfig(session.handle(), command, channel,
@@ -1842,7 +1859,112 @@ public final class DahuaExtAccess {
      * 早先这里硬用 GBK，配置里的中文名（巡航线名、预置点分组名）全变乱码。
      */
     private static String trimNul(byte[] buffer) {
-        String s = decodeName(buffer);
-        return s == null ? "" : s;
+        int end = 0;
+        while (end < buffer.length && buffer[end] != 0) {
+            end++;
+        }
+        if (end == 0) {
+            return "";
+        }
+        return decodeJsonDocument(buffer, end);
+    }
+
+    /**
+     * 包级可见：让单测能直接喂真实字节校验编码判定（{@code MixedCharsetDocumentTest}）。
+     *
+     * @param buffer 含尾部 0 填充的配置项字节
+     */
+    static String decodeForTest(byte[] buffer) {
+        return trimNul(buffer);
+    }
+
+    /**
+     * 解码一份 JSON 配置文档，<b>逐字段</b>判定编码。
+     *
+     * <h3>为什么不能整份文档判一次</h3>
+     * 设备上的数据可能<b>同时含两种编码</b>。实测这台球机
+     * （DH-SD49425DB-HNY-GQ-EAU / fw 3.201.0000007.1.R）读 {@code PtzTour}：
+     * <pre>
+     *   PtzTour[0][0].Name  = D1 B2 BA BD C8 BA BD 4D 31   ← GBK（平台早期写入）
+     *   PtzTour[0][2].Name  = E5 B7 A1 E8 88 AA …  33     ← UTF-8（设备界面写入）
+     * </pre>
+     * 整份文档做一次严格 UTF-8 校验时，只要有一个 GBK 字节就整体失败，
+     * 于是<b>全篇退化成 GBK</b>，把本来正确的 UTF-8 字段解成「宸¤埅缇ょ祫3」。
+     * 反过来先试 GBK 也一样会毁掉另一批字段 —— 一份文档里两种编码并存时，
+     * 任何「全局选一个字符集」的做法都必错一半。
+     *
+     * <p>所以按 JSON 字符串字面量切段，每段单独判：严格 UTF-8 通过就用 UTF-8，
+     * 否则按 GBK。判据本身没变（见 {@link #decodeName}），只是作用域从
+     * 「整份文档」缩小到「单个字符串值」。
+     *
+     * <p>结构字符（{@code {}[]:,"}、数字、true/false）都是 ASCII，
+     * 两种编码字节相同，逐段解码后原样拼回去，JSON 结构不受影响。
+     */
+    private static String decodeJsonDocument(byte[] buffer, int length) {
+        StringBuilder out = new StringBuilder(length);
+        int i = 0;
+        while (i < length) {
+            if (buffer[i] != '"') {
+                // 非字符串区间：ASCII 结构字符，直接按字节追加
+                out.append((char) (buffer[i] & 0xFF));
+                i++;
+                continue;
+            }
+            out.append('"');
+            i++;
+            int start = i;
+            boolean escaped = false;
+            while (i < length) {
+                byte b = buffer[i];
+                if (b == '\\' && i + 1 < length) {
+                    escaped = true;
+                    i += 2;
+                    continue;
+                }
+                if (b == '"') {
+                    break;
+                }
+                i++;
+            }
+            byte[] seg = new byte[i - start];
+            System.arraycopy(buffer, start, seg, 0, seg.length);
+            /*
+             * 含反斜杠转义的段原样按 ASCII 追加：转义序列本身是 ASCII
+             * （反斜杠 u 加四位十六进制），非 ASCII 不会以转义形式出现。
+             */
+            out.append(escaped ? new String(seg, StandardCharsets.ISO_8859_1)
+                    : decodeSegment(seg));
+            if (i < length) {
+                out.append('"');
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /** 单个字符串值：严格 UTF-8 优先，不通过则按 GBK。 */
+    private static String decodeSegment(byte[] seg) {
+        if (seg.length == 0) {
+            return "";
+        }
+        boolean ascii = true;
+        for (byte b : seg) {
+            if (b < 0) {
+                ascii = false;
+                break;
+            }
+        }
+        if (ascii) {
+            return new String(seg, StandardCharsets.US_ASCII);
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(seg))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            return new String(seg, GBK);
+        }
     }
 }

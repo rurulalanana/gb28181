@@ -8,7 +8,10 @@ import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -58,9 +61,18 @@ public class DahuaCgiAccess {
     /**
      * 设备 CGI 的<b>响应</b>是 UTF-8。
      *
-     * <p>这一点实测确认过：`PtzTour[0][0].Name` 的原始字节按 UTF-8 解是「巡航群組1」，
-     * 按 GBK 解是「宸¤埅缇ょ祫1」。早先整段用 GBK 解码，界面上那串乱码就是它 ——
-     * 与「编码风格不统一」无关，是解码用错了字符集。
+     * <p>实测确认：设备自己写的 {@code PtzTour[0][2].Name} 原始字节
+     * {@code E5 B7 A1 E8 88 AA E7 BE A4 E7 B5 84} 按 UTF-8 解是「巡航群組3」，
+     * 按 GBK 解是「宸¤埅缇ょ祫3」。早先整段用 GBK 解码，界面上那串乱码就是它。
+     *
+     * <p><b>但不能无条件只按 UTF-8 解</b>：设备上可能残留平台早期用 GBK 写入的名字
+     * （{@code D1 B2 BA BD C8 BA BD}），它过不了严格 UTF-8 校验。
+     * 而 {@code BodyHandlers.ofString(UTF_8)} 用的是宽松解码，会把非法字节
+     * 静默替成 {@code U+FFFD}（实测得到 {@code Ѳ��Ⱥ�M1}），
+     * 信息就此永久丢失，后面再怎么修都救不回来。
+     *
+     * <p>所以先取字节、再判定编码：严格 UTF-8 通过 → UTF-8，否则回退 GBK。
+     * 这也是 {@code DahuaExtAccess.decodeName} 一直在用的判据。
      */
     private static final Charset UTF_8 = StandardCharsets.UTF_8;
     /** 查询串的编码；请求参数也按 UTF-8 送，与设备的存储编码保持一致。 */
@@ -180,7 +192,102 @@ public class DahuaCgiAccess {
         if (authorization != null) {
             b.header("Authorization", authorization);
         }
-        return client.send(b.build(), HttpResponse.BodyHandlers.ofString(UTF_8));
+        /*
+         * 取字节而不是直接 ofString：编码要自己判（见 UTF_8 的注释）。
+         * 解码失败/乱码的代价是不可逆的，不能交给宽松解码器默默替换。
+         */
+        HttpResponse<byte[]> raw = client.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
+        return new RawResponse(raw.statusCode(), raw.headers(), decodeBody(raw.body()));
+    }
+
+    /**
+     * 判定响应体编码：<b>逐行</b>严格 UTF-8 优先，不通过则按 GBK。
+     *
+     * <h3>为什么必须逐行判</h3>
+     * 设备上的数据可能<b>同时含两种编码</b>。实测同一份 {@code PtzTour} 响应：
+     * <pre>
+     *   PtzTour[0][0].Name=D1 B2 BA BD C8 BA BD 4D 31   ← GBK（平台早期写入）
+     *   PtzTour[0][2].Name=E5 B7 A1 E8 88 AA …  33      ← UTF-8（设备界面写入）
+     * </pre>
+     * 整份响应做一次判定时，一个 GBK 字节就让整体校验失败，
+     * 全篇退化成 GBK，把本来正确的 UTF-8 行解成「宸¤埅缇ょ祫3」。
+     * CGI 响应本来就是「一行一个键值对」，按行切分既自然又精确。
+     *
+     * <p>为什么用 REPORT 而不是 {@code new String(bytes, UTF_8)}：后者会把非法字节
+     * 静默换成 {@code U+FFFD} 且永远「成功」，判不出真假，
+     * 而 GBK 字节被当成 UTF-8 时恰好就会这样 —— 信息就此永久丢失。
+     */
+    static String decodeBody(byte[] body) {
+        if (body == null || body.length == 0) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(body.length);
+        int start = 0;
+        for (int i = 0; i <= body.length; i++) {
+            if (i == body.length || body[i] == '\n') {
+                if (i > start) {
+                    out.append(decodeLine(body, start, i));
+                }
+                if (i < body.length) {
+                    out.append('\n');
+                }
+                start = i + 1;
+            }
+        }
+        return out.toString();
+    }
+
+    /** 解一行（不含换行符）：严格 UTF-8 优先，不通过则按 GBK。 */
+    private static String decodeLine(byte[] body, int from, int to) {
+        boolean ascii = true;
+        for (int i = from; i < to; i++) {
+            if (body[i] < 0) {
+                ascii = false;
+                break;
+            }
+        }
+        if (ascii) {
+            return new String(body, from, to - from, StandardCharsets.US_ASCII);
+        }
+        ByteBuffer buf = ByteBuffer.wrap(body, from, to - from);
+        try {
+            return UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(buf)
+                    .toString();
+        } catch (CharacterCodingException e) {
+            return new String(body, from, to - from, GBK);
+        }
+    }
+
+    /** 只带状态码/响应头/已解码正文的最小响应载体。 */
+    private record RawResponse(int statusCode, java.net.http.HttpHeaders headers, String body)
+            implements HttpResponse<String> {
+        @Override
+        public java.util.Optional<HttpResponse<String>> previousResponse() {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public HttpRequest request() {
+            return null;
+        }
+
+        @Override
+        public java.util.Optional<javax.net.ssl.SSLSession> sslSession() {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public URI uri() {
+            return URI.create("http://device");
+        }
+
+        @Override
+        public HttpClient.Version version() {
+            return HttpClient.Version.HTTP_1_1;
+        }
     }
 
     private static String checkStatus(HttpResponse<String> resp, DahuaSdk.Session session,
