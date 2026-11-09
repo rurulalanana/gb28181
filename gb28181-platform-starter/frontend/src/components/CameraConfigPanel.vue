@@ -288,6 +288,10 @@ const activeItems = computed(() => {
  * （曝光模式 → 快门 → 快门范围）。只看直接上级的话，
  * 用户先把快门设成「自定义」、再把曝光模式切回「自动」，
  * 快门下拉被隐藏了，但它下面的毫秒范围框仍会留在页面上。
+ *
+ * @param {object} c     能力项
+ * @param {number} depth 递归深度（仅内部使用，<b>不要</b>把这个函数直接传给
+ *                       {@code Array.filter}：那样第二实参是数组下标，会被当成 depth）
  */
 function dependencyMet(c, depth = 0) {
   if (!c.dependsOn) return true
@@ -313,8 +317,19 @@ function dependencyMet(c, depth = 0) {
  * <p>与设备 Web 界面一致：曝光模式选「手动」才出现快门/增益/光圈，
  * 白平衡选「手动」才出现红蓝增益，日夜模式选「自动」才出现灵敏度与延迟。
  * 不隐藏的话自动模式下摆着一堆无效输入框，用户改了不生效还以为是平台的 bug。
+ *
+ * <p><b>必须写成 {@code filter((c) => dependencyMet(c))}，不能写 {@code filter(dependencyMet)}。</b>
+ * 后者会把 {@code Array.filter} 的第二个实参（<b>数组下标</b>）当成 {@code dependencyMet}
+ * 的第二个形参 {@code depth} 传进去，于是：
+ * <pre>
+ *   下标 0~5  → depth 0~5，正常判断
+ *   下标 6+   → depth > 5，命中「递归太深，放行」的保护分支 → 恒显示
+ * </pre>
+ * 实测后果：曝光组里「2D/3D 降噪等级」排在第 12 项，关掉降噪开关后滑块仍然留在页面上，
+ * 与设备界面不一致。这个 bug 只在参数多到下标 &gt; 5 的分组里出现，
+ * 参数少的分组看起来完全正常，很难第一时间联想到 {@code filter} 的签名。
  */
-const visibleItems = computed(() => activeItems.value.filter(dependencyMet))
+const visibleItems = computed(() => activeItems.value.filter((c) => dependencyMet(c)))
 
 /*
  * 保证当前页有效：换通道 / 换型号后分组可能变少，停在已经不存在的页上
