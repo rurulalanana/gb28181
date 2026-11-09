@@ -2205,10 +2205,26 @@ const runningPattern = computed(() => (activeRun.value.type === 'pattern' ? acti
  * <p>设备默认名是「巡跡N」——<b>繁体「跡」</b>（实测 {@code AutoPattern[0][n].Name}
  * 返回 {@code 5de1 8de1 31} = 巡跡1，固件是繁体界面）。简体「巡迹N」和
  * {@code PatternN} 也一并认，避免换固件后判据失效。
+ *
+ * <h3>为什么还要认「乱码名」</h3>
+ * 平台早期用 GBK 写设备配置，把空槽的默认名写成了坏字节。设备按 UTF-8 解不出来，
+ * 于是 {@code AutoPattern[0][n].Name} 变成 {@code Ѳ�E3} 这种字符串
+ * （含 {@code U+FFFD} 替换字符，<b>不可逆</b>）。
+ *
+ * <p>实测后果：这台设备 32 个槽位里只有前 2 个还是 {@code Pattern1}/{@code Pattern2}，
+ * 第 3~32 个全成了 {@code Ѳ�E3}…{@code Ѳ�E32}。它们 {@code Enable=false}（从没录过），
+ * 但名称既不是默认名也不是空串，被当成「已配置」全部显示出来 ——
+ * 界面上一片空白巡迹，用户以为平台凭空造了 30 条数据。
+ *
+ * <p>判据：名称里带 {@code U+FFFD}（{@code \uFFFD}）就说明它是解码失败的残留，
+ * 与「空槽」等价。正常的中文名不会包含这个字符 —— 它是 UTF-8 解码器
+ * 遇到非法字节时的占位符，只会出现在数据已经损坏的场合。
  */
 function isPatternDefaultName(row) {
   const name = (row.name || '').trim()
   if (!name) return true
+  // 解码失败的残留（旧版 GBK 写入留下的），等价于空槽
+  if (name.includes('\uFFFD')) return true
   const n = row.patternId
   return name === '巡跡' + n || name === '巡迹' + n || name === 'Pattern' + n
 }

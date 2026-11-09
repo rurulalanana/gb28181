@@ -893,7 +893,14 @@ public class DahuaPtzConfigService {
              * 新写进去的名字与设备自己写的一致，不会再产生新的坏数据。
              */
             String name = names.get(route);
-            if (name == null || name.isBlank()) {
+            if (name == null || name.isBlank() || isCorruptedName(name)) {
+                /*
+                 * 空名与「解码残留名」都归一到默认名。
+                 *
+                 * <p>残留名指含 {@code U+FFFD} 的字符串 —— 那是不可逆的损坏
+                 * （旧版 GBK 写入留下的），留着只会在界面上显示成一串方块。
+                 * 归一后前端按「名称 == 默认名」判断空槽，行为才正确。
+                 */
                 name = "巡航组" + (route + 1);
             }
             tours.add(new Tour(route + 1, name,
@@ -938,6 +945,19 @@ public class DahuaPtzConfigService {
      *
      * <p>名称/启用来自 {@code AutoPattern}，停留时间来自 {@code PatternPlayDetail}
      * （两个配置项按同一个下标对应）。缺任一项不影响另一项显示。
+     *
+     * <h3>为什么要把「乱码名」改写成默认名</h3>
+     * 平台早期用 GBK 写设备配置，把空槽的默认名写成了坏字节。设备按 UTF-8 解不出来，
+     * 于是 {@code AutoPattern[0][n].Name} 变成 {@code Ѳ\uFFFD E3} 这种字符串
+     * （{@code U+FFFD} 是解码器的占位符，<b>不可逆</b>）。
+     *
+     * <p>实测后果：一台设备 32 个槽位里只有前 2 个还是 {@code Pattern1}/{@code Pattern2}，
+     * 第 3~32 个全成了乱码。它们 {@code Enable=false}（从没录过），
+     * 但名称既不是默认名也不是空串 —— 前端按「名称非默认 = 已配置」判断，
+     * 于是界面上凭空多出 30 条空巡迹。
+     *
+     * <p>在这里规整而不是只在前端过滤：接口、导出、日志拿到的都是干净数据，
+     * 不用每个消费方各自实现一遍「认不认乱码」。
      */
     private List<PatternCfg> parsePatterns(Map<String, String> patternRaw,
                                            Map<String, String> detailRaw, int ch) {
@@ -951,12 +971,41 @@ public class DahuaPtzConfigService {
             int delayMs = intOf(detail.getOrDefault(idx, Map.of())
                     .get("StartPatternPlayDelay"), 0);
             int staySeconds = delayMs > 0 ? delayMs / 1000 : 0;
+            String name = normalizePatternName(f.get("Name"), idx + 1);
             list.add(new PatternCfg(idx + 1,
-                    f.getOrDefault("Name", "Pattern" + (idx + 1)),
+                    name,
                     Boolean.parseBoolean(f.getOrDefault("Enable", "false")),
                     staySeconds));
         }
         return list;
+    }
+
+    /**
+     * 巡迹名称规整：坏名与空名都归一成默认名 {@code PatternN}。
+     *
+     * <p>抽成包级静态方法是为了能单测 —— 它决定「这条巡迹算不算已配置」，
+     * 而判错的后果很直观（界面上凭空多出几十条空巡迹）。
+     *
+     * @param name      设备返回的原始名称，可为 {@code null}
+     * @param oneBased  1-based 巡迹号
+     */
+    static String normalizePatternName(String name, int oneBased) {
+        String fallback = "Pattern" + oneBased;
+        if (name == null || name.isBlank() || isCorruptedName(name)) {
+            return fallback;
+        }
+        return name;
+    }
+
+    /**
+     * 名称是否是「解码失败留下的残留」。
+     *
+     * <p>{@code U+FFFD}（{@code \uFFFD}）是 UTF-8 解码器遇到非法字节时的占位符。
+     * 它<b>只会</b>出现在数据已损坏的场合 —— 正常录入的中文名不含这个字符。
+     * 早期平台用 GBK 写设备配置留下的历史数据就是这个特征。
+     */
+    static boolean isCorruptedName(String name) {
+        return name != null && name.indexOf('\uFFFD') >= 0;
     }
 
     /**
