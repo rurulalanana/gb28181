@@ -367,7 +367,7 @@ public class DahuaPtzConfigService {
          */
         kv.put(prefix + ".Enable", points.isEmpty() ? "false" : "true");
         kv.put(prefix + ".Name", tour.name() == null || tour.name().isBlank()
-                ? "巡航群組" + route : tour.name().trim());
+                ? "巡航组" + route : tour.name().trim());
         for (int slot = 0; slot < TOUR_SLOTS; slot++) {
             if (slot < points.size()) {
                 TourPoint p = points.get(slot);
@@ -894,7 +894,7 @@ public class DahuaPtzConfigService {
              */
             String name = names.get(route);
             if (name == null || name.isBlank()) {
-                name = "巡航群組" + (route + 1);
+                name = "巡航组" + (route + 1);
             }
             tours.add(new Tour(route + 1, name,
                     enables.getOrDefault(route, false), pts));

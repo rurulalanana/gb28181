@@ -224,7 +224,7 @@ public class DahuaCapabilityService {
             throw BizException.badRequest(
                     "这台设备的固件只在 PtzLimit 里提供了「上限」字段，没有「下限」，"
                             + "所以平台无法设置旋转下限。"
-                            + "设备自己的 Web 界面「PTZ旋轉限制」页如果显示了下限，请在那里设置一次。");
+                            + "设备自己的 Web 界面「PTZ旋转限制」页如果显示了下限，请在那里设置一次。");
         }
         Map<String, Object> pos = ptzPosition(session, channel);
         if (pos.get("tilt") == null) {
@@ -514,7 +514,7 @@ public class DahuaCapabilityService {
                 case "ptz-default" -> throw BizException.badRequest(
                         "PTZ 恢复出厂设置需要设备的 Web 接口（RPC2），"
                                 + "当前设备通过主动注册接入，平台无法直连它的 Web 端口。"
-                                + "请在设备自己的 Web 界面「PTZ 維護 → 預設值」里操作。");
+                                + "请在设备自己的 Web 界面「PTZ 维护 → 预设值」里操作。");
                 default -> throw BizException.badRequest("不支持的云台动作：" + action);
             }
         } catch (DahuaSdkException e) {
