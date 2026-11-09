@@ -63,6 +63,9 @@
     <module>gb28181-sip</module>
     <module>gb28181-sip-zlm</module>
     <module>device-access</module>
+    <module>vision-api</module>
+    <module>vision-onnx</module>
+    <module>vision-pipeline</module>
     <module>sdk-dahua</module>
     <module>sdk-hikvision</module>
     <module>gb28181-platform-starter</module>
@@ -122,6 +125,21 @@
       <dependency>
         <groupId>io.github.rurulalanana</groupId>
         <artifactId>device-access</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>vision-api</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>vision-onnx</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.rurulalanana</groupId>
+        <artifactId>vision-pipeline</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
