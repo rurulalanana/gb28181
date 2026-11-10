@@ -42,6 +42,15 @@ public final class VisionPipeline implements AutoCloseable {
     private final AtomicLong droppedFrames = new AtomicLong();
     private final AtomicLong inferredFrames = new AtomicLong();
 
+    /**
+     * 节流容差：允许比目标间隔早 10% 的帧通过。
+     *
+     * <p>上游 {@code -vf fps=N} 的出帧间隔并不精确（实测在 990~1010ms 之间抖动），
+     * 用严格比较会把合法的 999ms 帧判成「太早」而丢弃，
+     * 结果 fps=1 的有效帧率只有 0.3~0.7。详见 {@code consume()} 里的说明。
+     */
+    private static final double THROTTLE_TOLERANCE = 0.9;
+
     /** 单路的队列与节流状态。 */
     private static final class Lane {
         final ArrayBlockingQueue<Frame> queue;
@@ -118,10 +127,46 @@ public final class VisionPipeline implements AutoCloseable {
             if (frame == null) {
                 continue;
             }
-            // 节流：未到间隔的帧直接丢弃（实时性优先于完整性）
+            /*
+             * 排空积压，只保留最新一帧。
+             *
+             * <h3>这是「框比画面慢好几秒」的根因修复</h3>
+             * 队列里装的是<b>同一个画面在时间上的一串快照</b>，对实时叠框来说
+             * 只有最新那帧有意义。早先的消费方式是严格 FIFO：推理只要比取帧慢
+             * 一点点，队列就长期处于满的状态，消费端于是永远在处理
+             * 「queueCapacity 帧之前」的画面 —— 积压量固定在那里，不会自愈。
+             *
+             * <p>实测（fps=4、queueCapacity=4、1280×720 H.265 两路）：
+             * 第二路结果的中位陈旧度 <b>1553ms</b>、最坏 <b>3465ms</b>，
+             * 而单帧推理只要 60~90ms。也就是说延迟几乎全部来自排队，
+             * 不是模型慢。这也解释了为什么提高 fps 反而更糟：帧进得越快，
+             * 积压的绝对量越大。
+             *
+             * <p>排空后队列深度恒在 0~1，陈旧度 ≈ 单帧推理耗时。
+             * 被丢掉的帧计入 droppedFrames，如实反映「为了实时性牺牲了多少帧」。
+             */
+            Frame newer;
+            while ((newer = lane.queue.poll()) != null) {
+                droppedFrames.incrementAndGet();
+                frame = newer;
+            }
+            /*
+             * 节流：未到间隔的帧直接丢弃（实时性优先于完整性）。
+             *
+             * <h3>为什么留 10% 容差（这里曾经把有效帧率砍掉一半）</h3>
+             * 上游 {@code -vf fps=N} 的出帧间隔是「约」1/N 秒，实测会在
+             * 990~1010ms 之间抖动。用严格的 {@code now - last < 1000} 判定，
+             * 凡是间隔 999ms 的帧都被当成「太早」丢掉，下一帧又要再等一个周期 ——
+             * 于是 fps=1 的实际有效帧率只有 0.3~0.7，且丢帧率高达 30~68%
+             * （实测三路：0.70 / 0.70 / 0.30 fps）。
+             *
+             * 留 10% 容差后，999ms 的帧能通过，同时仍能挡住
+             * 「ffmpeg 重启时一次性吐出多帧」这类真正的突发。
+             */
             long now = System.currentTimeMillis();
             long last = lane.lastInferMs.get();
-            if (now - last < config.minIntervalMs()) {
+            long minGap = (long) (config.minIntervalMs() * THROTTLE_TOLERANCE);
+            if (now - last < minGap) {
                 droppedFrames.incrementAndGet();
                 continue;
             }

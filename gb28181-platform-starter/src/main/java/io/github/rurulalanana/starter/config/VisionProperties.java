@@ -62,8 +62,26 @@ public class VisionProperties {
      */
     private String defaultModel = "";
 
-    /** 推理目标帧率（每路）。无 GPU 时 1 fps 是实测可用的值。 */
-    private double fps = 1.0;
+    /**
+     * 推理目标帧率（每路）。
+     *
+     * <h3>为什么是 4 而不是 1 或 2</h3>
+     * 这个值直接决定「框跟随画面」的跟手程度：
+     * <ul>
+     *   <li>1 fps —— 人走动时框明显「跳」，间隔一秒像在逐格播放</li>
+     *   <li>2 fps —— 勉强跟手，快速移动仍有可感知的滞后</li>
+     *   <li>4 fps —— 框贴合得比较自然，平均延迟约 125ms</li>
+     * </ul>
+     *
+     * <p>实测代价很小：8 核机器跑 3 路 1280×720，推理线程只占 15% CPU
+     * （load average 0.66）。关键在于取帧侧已经在 ffmpeg 里缩到 416 宽
+     * （见 {@code ZlmFrameSource}），单帧推理只要 60~90ms。
+     *
+     * <p>再往上加收益递减：前端轮询周期是按这个值算的
+     * （{@code 1000/fps} 毫秒），fps=4 时轮询 250ms 一次，
+     * 已经接近「人眼不易察觉」的边界。要更低延迟得改成 WebSocket 推送。
+     */
+    private double fps = 4.0;
 
     /** 单路队列容量：满了丢最旧的帧，不堆积延迟。 */
     private int queueCapacity = 4;

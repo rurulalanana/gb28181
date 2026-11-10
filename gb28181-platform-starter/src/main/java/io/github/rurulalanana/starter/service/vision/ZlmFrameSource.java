@@ -71,8 +71,67 @@ public class ZlmFrameSource implements FrameSource {
     /** 单帧 JPEG 上限（4K 也够）：超过说明标记解析跑飞了，丢弃重来。 */
     private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
 
-    /** 出图质量：2 比默认好一些，对检测精度有实际影响（压缩伪影会被当成纹理）。 */
-    private static final String JPEG_QUALITY = "3";
+    /**
+     * 出图质量。
+     *
+     * <p>模型输入只有 416×416，画面先缩到这个尺寸再编码，
+     * 所以这里可以用更高的压缩率（数值越大压缩越狠）而不影响检测：
+     * 压缩伪影在 416 尺度上早被下采样抹平了。
+     */
+    private static final String JPEG_QUALITY = "5";
+
+    /**
+     * 在 ffmpeg 侧就把画面缩到模型输入尺寸（宽固定，高按长宽比）。
+     *
+     * <h3>为什么不能交给 Java 侧缩放（这是「框和画面延迟大」的一半原因）</h3>
+     * 实测同一路 1280×720 H.265：
+     * <pre>
+     *   不缩放（-q:v 3）    每帧 288 KB   → 管道搬运 + JPEG 解码 + Java 缩放
+     *   缩到 416 宽（-q:v 5）每帧 ~15 KB   → 数据量降到 1/19
+     * </pre>
+     * 每帧 288KB 意味着 4fps 下要搬 1.1MB/s 过管道，Java 侧再
+     * {@code ImageIO.read} 解一遍 1280×720、然后用 {@code Graphics2D}
+     * 缩到 416×416 —— 这些全在推理线程里做，直接吃掉帧率。
+     * 实测这一路因此只能跑到 0.5~1.5 fps，而配置是 4 fps。
+     *
+     * <p>缩放放在 ffmpeg 里几乎是免费的：它本来就要解码整帧，
+     * 顺手 swscale 一次比跨进程搬运像素便宜得多。
+     *
+     * <h3>为什么是 {@code 416:-2} 而不是 {@code 416:416}（这点很关键）</h3>
+     * 直接压成正方形会改变长宽比：1280×720 压到 416×416，水平被压 3.08 倍、
+     * 垂直只压 1.73 倍，<b>站立的行人会变成细长的竖条</b>，检出率断崖式下降
+     * —— 这正是 {@code OnnxVisionDetector.preprocess} 注释里警告过的坑。
+     *
+     * <p>{@code -2} 表示「高度按长宽比算，并取偶数」：1280×720 → 416×234。
+     * 于是检测器拿到的就是 16:9 的正常画面，它自己的 letterbox
+     * （补 114 灰边到 416×416）才能按 YOLOX 官方口径正常工作。
+     *
+     * <p>框坐标是<b>相对这一帧</b>归一化的，而缩放是逐轴线性的，
+     * 所以百分比位置原样映射回原始画面 —— 前端叠框不需要任何换算。
+     * 竖屏流（如 720×1280）会得到 416×740，比理论最优稍大，
+     * 但检测依然正确，且监控场景几乎都是横屏。
+     */
+    private static final int FRAME_WIDTH = 416;
+
+    /**
+     * 解封装探针大小（字节）。
+     *
+     * <h3>为什么必须显式设置（这是「开启检测要等好几秒才出框」的根因）</h3>
+     * ffmpeg 默认 {@code probesize=5000000}、{@code analyzeduration=5000000}：
+     * 从管道读 TS 时它要<b>先攒够 5MB 数据才肯输出第一帧</b>。
+     * 实测同一个流、同样的 {@code -vf fps}：
+     * <pre>
+     *   默认参数           首帧 4001~4498 ms
+     *   probesize=100k     首帧  284~2840 ms（多数 &lt; 500ms）
+     *   probesize=32       0 帧（太小，解不出流参数）
+     * </pre>
+     * 所以取 100k：既能让 mpegts 立刻解出 SPS/PPS 开始出图，
+     * 又留了足够余量识别音视频流参数（32 字节会直接失败）。
+     *
+     * <p>{@code analyzeduration=0} 让它别再做「猜编码」的等待：
+     * TS 里 stream_type 已经写明是 H.264/H.265，不需要靠采样推断。
+     */
+    private static final String PROBE_SIZE = "100000";
 
     private final String sourceId;
     private final String streamUrl;
@@ -150,11 +209,26 @@ public class ZlmFrameSource implements FrameSource {
                 FFMPEG,
                 "-hide_banner",
                 "-loglevel", "error",
+                /*
+                 * 低延迟三件套：不加这三项首帧要等 4 秒以上（详见 PROBE_SIZE 注释）。
+                 * 它们必须在 -i 之前，属于「输入侧」选项。
+                 */
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-probesize", PROBE_SIZE,
+                "-analyzeduration", "0",
                 // 容忍解码错误：活流刚开始可能丢半个 GOP
                 "-err_detect", "ignore_err",
                 // 从管道读 MPEG-TS，用 fps 滤镜按目标频率出图（这是「常驻」的关键）
                 "-i", "pipe:0",
-                "-vf", "fps=" + fps,
+                /*
+                 * 先按目标帧率抽帧，再缩到模型输入尺寸。
+                 *
+                 * 顺序不能反：先 scale 后 fps 会让 ffmpeg 把每一帧都缩一遍
+                 * （上游 25fps → 每秒缩 25 次），而先 fps 后 scale 只缩 4 次。
+                 * 画质上两者等价（fps 滤镜只丢帧不混合），CPU 差好几倍。
+                 */
+                "-vf", "fps=" + fps + ",scale=" + FRAME_WIDTH + ":-2",
                 "-f", "image2pipe",
                 "-vcodec", "mjpeg",
                 "-q:v", JPEG_QUALITY,
