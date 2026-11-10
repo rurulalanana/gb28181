@@ -36,6 +36,20 @@ public class DbDetectionSink implements DetectionSink {
     private final Map<String, Long> lastFired = new ConcurrentHashMap<>();
 
     /**
+     * 实时推送器（WebSocket）。
+     *
+     * <p>用 setter 注入而不是构造器：{@code VisionBroadcaster} 不依赖 sink，
+     * 但用构造器会强制所有单测都去构造一个广播器（它会起定时线程，
+     * 单测里既不必要也难清理）。这里允许为 {@code null}，表示「不推」。
+     */
+    private volatile VisionBroadcaster broadcaster;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setBroadcaster(VisionBroadcaster broadcaster) {
+        this.broadcaster = broadcaster;
+    }
+
+    /**
      * 一路画面的最新检测结果。
      *
      * @param sourceId    通道编码
@@ -77,6 +91,25 @@ public class DbDetectionSink implements DetectionSink {
                 detections == null ? List.of() : List.copyOf(detections),
                 frame == null ? 0 : frame.width(),
                 frame == null ? 0 : frame.height()));
+
+        /*
+         * 同步喂给实时推送器（WebSocket 用）。
+         *
+         * 这一步<b>只写内存</b>，不序列化、不发网络：它跑在推理线程上，
+         * 任何阻塞都会直接拉低帧率。真正的推送由 VisionBroadcaster 的
+         * 独立线程按固定节拍合并后发出。
+         *
+         * 推送器为 null 表示它没被装配（比如脱离 Spring 的单测），
+         * 此时静默跳过 —— 内存快照本身已经写好了，REST 轮询照样能用。
+         */
+        VisionBroadcaster b = broadcaster;
+        if (b != null) {
+            b.onDetections(sourceId,
+                    frame == null ? System.currentTimeMillis() : frame.timestampMs(),
+                    frame == null ? 0 : frame.width(),
+                    frame == null ? 0 : frame.height(),
+                    detections);
+        }
     }
 
     @Override
@@ -153,5 +186,13 @@ public class DbDetectionSink implements DetectionSink {
          */
         String prefix = sourceId + '\u0000';
         lastFired.keySet().removeIf(k -> k.startsWith(prefix));
+        /*
+         * 推送器的待推状态同样要清，否则前端会一直显示最后一帧的框
+         * （通道已经停了，但广播器里还留着最后一次的结果）。
+         */
+        VisionBroadcaster b = broadcaster;
+        if (b != null) {
+            b.forget(sourceId);
+        }
     }
 }

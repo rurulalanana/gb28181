@@ -2,6 +2,8 @@ package io.github.rurulalanana.starter.service.vision;
 
 import io.github.rurulalanana.starter.config.VisionProperties;
 import io.github.rurulalanana.starter.entity.GbStream;
+import io.github.rurulalanana.starter.entity.GbVisionChannel;
+import io.github.rurulalanana.starter.mapper.GbVisionChannelMapper;
 import io.github.rurulalanana.starter.service.FfmpegSnapService;
 import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.vision.VisionDetector;
@@ -46,6 +48,7 @@ public class VisionService {
     private final StreamService streamService;
     private final FfmpegSnapService ffmpegSnapService;
     private final DbDetectionSink sink;
+    private final GbVisionChannelMapper visionChannelMapper;
 
     /** 正在检测的通道：通道编码 → 运行中的一路。 */
     private final Map<String, Running> running = new ConcurrentHashMap<>();
@@ -86,13 +89,57 @@ public class VisionService {
             log.warn("视觉识别已启用但没有可用模型，跳过自动开启");
             return;
         }
-        List<String> channels = props.getChannels();
-        if (channels == null || channels.isEmpty()) {
-            log.info("视觉识别已启用但未配置通道（vision.channels），等待接口手动开启");
+        /*
+         * 先把 yml 的通道清单导入库（表为空时才导）。
+         *
+         * 放在这里而不是构造器里：构造器阶段数据库可能还没就绪，
+         * 而 ApplicationReadyEvent 时 schema.sql 一定已执行完。
+         */
+        seedFromPropertiesIfEmpty();
+        List<String> channels = configuredChannels();
+        if (channels.isEmpty()) {
+            log.info("视觉识别已启用但没有配置任何通道，等待在「AI 检测」页面勾选");
             return;
         }
         // 先试一轮，失败的下一次 tick 再试（设备可能还没注册上来）
         retryPending();
+    }
+
+    /**
+     * 要跑检测的通道清单。
+     *
+     * <h3>为什么以库为准，yml 只当种子</h3>
+     * 用户在界面上勾选通道后，选择落在 {@code gb_vision_channel}。
+     * 如果这里继续读 {@code props.getChannels()}，重启就会把界面的改动
+     * <b>整体覆盖</b>回 yml 里的值 —— 表现为「配了但重启就没了」，
+     * 而日志上完全看不出问题。
+     *
+     * <p>所以：<b>表里有行就完全以表为准</b>（哪怕只有一行）；表为空时才用
+     * yml 的 {@code vision.channels} 作为初始种子。这样全新部署仍然
+     * 「配了 yml 就能跑」，而一旦运维在界面上动过，就以界面为准。
+     *
+     * <p>不做「yml ∪ 表」的并集：那样界面上<b>取消</b>一个 yml 里的通道
+     * 永远取消不掉 —— 每次重启它又回来了。这比「少一个通道」更难排查。
+     */
+    private List<String> configuredChannels() {
+        List<GbVisionChannel> rows = visionChannelMapper.selectList(null);
+        if (rows != null && !rows.isEmpty()) {
+            List<String> out = new ArrayList<>(rows.size());
+            for (GbVisionChannel row : rows) {
+                String key = row.channelKey();
+                if (key != null && !key.isBlank()) {
+                    out.add(key);
+                }
+            }
+            return out;
+        }
+        List<String> seed = props.getChannels();
+        return seed == null ? List.of() : seed;
+    }
+
+    /** 当前生效的通道清单（给接口用，与 {@link #configuredChannels()} 同源）。 */
+    public List<String> activeChannels() {
+        return configuredChannels();
     }
 
     /**
@@ -114,8 +161,8 @@ public class VisionService {
         if (!props.isEnabled() || !registry.available()) {
             return;
         }
-        List<String> channels = props.getChannels();
-        if (channels == null || channels.isEmpty()) {
+        List<String> channels = configuredChannels();
+        if (channels.isEmpty()) {
             return;
         }
         int started = 0;
@@ -292,6 +339,174 @@ public class VisionService {
     /** 正在检测的通道数。 */
     public int runningCount() {
         return running.size();
+    }
+
+    // ==================== 通道配置（界面用） ====================
+
+    /**
+     * 列出已配置的检测通道，并附带运行态。
+     *
+     * <p>把「配置」和「实际在跑」放在同一行返回，是因为这两者会不一致：
+     * 设备离线、模型不可用、刚启动还没 attach 完成时，配置里有这一路
+     * 但 {@code running=false}。分开两个接口查，界面要自己对齐，
+     * 而这个对齐逻辑每个调用方都会写错一次。
+     *
+     * @return 每行含 channel / deviceId / channelId / remark / running / healthy 等
+     */
+    public List<Map<String, Object>> listConfigured() {
+        List<GbVisionChannel> rows = visionChannelMapper.selectList(null);
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (rows == null) {
+            return out;
+        }
+        for (GbVisionChannel row : rows) {
+            String key = row.channelKey();
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", row.getId());
+            item.put("deviceId", row.getDeviceId());
+            item.put("channelId", row.getChannelId());
+            item.put("channel", key);
+            item.put("remark", row.getRemark());
+            item.put("createTime", row.getCreateTime() == null ? null
+                    : row.getCreateTime().toString());
+
+            Running r = key == null ? null : running.get(key);
+            item.put("running", r != null);
+            item.put("model", r == null ? null : r.modelId);
+            item.put("inferredFrames", r == null ? 0 : r.pipeline.inferredFrames());
+            item.put("droppedFrames", r == null ? 0 : r.pipeline.droppedFrames());
+            DbDetectionSink.Latest latest = key == null ? null : sink.latestOf(key);
+            item.put("lastFrameAt", latest == null ? 0 : latest.at());
+            item.put("counts", latest == null ? Map.of() : latest.counts());
+            /*
+             * healthy 只对「在跑」的通道有意义。
+             * 没在跑时给 false 而不是 null：前端少一个分支，
+             * 且「配置了但没跑起来」本来就该显示成不健康。
+             */
+            boolean inferred = r != null && r.pipeline.inferredFrames() > 0;
+            item.put("healthy", inferred);
+            if (r != null && !inferred) {
+                item.put("hint", "已启动但还没有产出推理帧，请确认设备在线且在推流");
+            }
+            out.add(item);
+        }
+        return out;
+    }
+
+    /**
+     * 新增一路检测通道（幂等：已存在直接返回成功）。
+     *
+     * <p>写入库后<b>立即尝试启动</b>，但启动失败不回滚配置 ——
+     * 设备可能只是暂时离线，{@code retryPending()} 会在 30 秒内自动补上。
+     * 如果这里因为「设备不在线」拒绝保存，运维就得等设备上线再来配一次。
+     *
+     * @return 是否为新插入（{@code false} 表示已存在）
+     */
+    public boolean addChannel(String deviceId, String channelId, String remark) {
+        if (channelId == null || channelId.isBlank()) {
+            throw new IllegalArgumentException("通道编码不能为空");
+        }
+        String cid = channelId.trim();
+        String did = deviceId == null || deviceId.isBlank() ? null : deviceId.trim();
+
+        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
+                new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
+        q.eq("channel_id", cid);
+        Long exists = visionChannelMapper.selectCount(q);
+        boolean inserted = exists == null || exists == 0;
+        if (inserted) {
+            GbVisionChannel row = new GbVisionChannel();
+            row.setDeviceId(did);
+            row.setChannelId(cid);
+            row.setRemark(remark);
+            visionChannelMapper.insert(row);
+        }
+        // 立即试一次；失败也无所谓，定时任务会补
+        String key = did == null ? cid : did + "/" + cid;
+        if (!running.containsKey(key)) {
+            start(key);
+        }
+        return inserted;
+    }
+
+    /**
+     * 删除一路检测通道：先从配置移除，再停掉正在跑的那一路。
+     *
+     * <p>顺序不能反。先停再删的话，如果删除失败，配置里还留着这一路，
+     * 30 秒后 {@code retryPending()} 又把它启动起来 —— 用户会看到
+     * 「点了删除，过一会儿又自己开了」。先删库，再停：即使停失败，
+     * 配置已经没了，重试不会再启动它。
+     *
+     * @return 是否确实删掉了配置行
+     */
+    public boolean removeChannel(String channelId) {
+        if (channelId == null || channelId.isBlank()) {
+            return false;
+        }
+        String cid = channelId.trim();
+        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
+                new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
+        q.eq("channel_id", cid);
+        List<GbVisionChannel> rows = visionChannelMapper.selectList(q);
+        if (rows == null || rows.isEmpty()) {
+            return false;
+        }
+        visionChannelMapper.delete(q);
+        /*
+         * 停掉所有指向这个通道编码的运行实例。
+         *
+         * 键是「设备编码/通道编码」，而删除是按通道编码删的，
+         * 所以要把所有以它结尾的键都找出来 —— 不能只拼一个 key，
+         * 否则设备编码猜错就停不掉，表现为「配置删了但还在跑」。
+         */
+        for (String key : new ArrayList<>(running.keySet())) {
+            if (key.equals(cid) || key.endsWith("/" + cid)) {
+                stop(key);
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 把 yml 的 {@code vision.channels} 导入库（只在表为空时执行）。
+     *
+     * <p>这样全新部署仍然「配了 yml 就能跑」，而之后界面的改动不会被重启覆盖。
+     * 已经有行时完全不动 —— 否则运维在界面上删掉的通道会被种回来。
+     *
+     * @return 导入的条数（0 表示表非空，未导入）
+     */
+    public int seedFromPropertiesIfEmpty() {
+        Long count = visionChannelMapper.selectCount(null);
+        if (count != null && count > 0) {
+            return 0;
+        }
+        List<String> seed = props.getChannels();
+        if (seed == null || seed.isEmpty()) {
+            return 0;
+        }
+        int imported = 0;
+        for (String raw : seed) {
+            if (raw == null || raw.isBlank()) {
+                continue;
+            }
+            String[] ids = splitKey(raw.trim());
+            GbVisionChannel row = new GbVisionChannel();
+            row.setDeviceId(ids[0]);
+            row.setChannelId(ids[1]);
+            row.setRemark("由 vision.channels 初始化导入");
+            try {
+                visionChannelMapper.insert(row);
+                imported++;
+            } catch (RuntimeException e) {
+                // 唯一键冲突（重复配置）不该让启动失败
+                log.debug("导入视觉通道跳过: {} {}", raw, e.getMessage());
+            }
+        }
+        if (imported > 0) {
+            log.info("视觉识别：已把 vision.channels 的 {} 路导入 gb_vision_channel（之后以库为准）",
+                    imported);
+        }
+        return imported;
     }
 
     /**

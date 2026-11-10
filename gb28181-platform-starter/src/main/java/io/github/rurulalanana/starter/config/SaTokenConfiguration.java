@@ -58,7 +58,11 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                         // Authorization 头，令牌只能拼在 query 上（ws://...?talkId=&token=）。
                         // 放行的只是握手请求；真正的鉴权在 DahuaTalkWebSocketHandler 里
                         // 用 StpUtil.getLoginIdByToken(token) 再做一次，无效连接直接 1008 关闭。
-                        "/api/v1/dahua/talk/audio"
+                        "/api/v1/dahua/talk/audio",
+                        // AI 检测结果推送（WebSocket 握手）：同上，new WebSocket() 带不了
+                        // 请求头，token 只能放 query。真正的鉴权在 VisionWebSocketHandler
+                        // 里再做一次，无效连接直接 1008 关闭。
+                        "/api/v1/vision/ws"
                 );
         // 操作日志：记录 /api/v1/** 的接口调用（排除项在拦截器内部处理）
         registry.addInterceptor(operationLogInterceptor)

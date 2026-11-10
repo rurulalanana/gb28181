@@ -310,6 +310,8 @@
               AI 检测开关：叠在画面右上角（不影响左下角的播放器控制栏）。
               用 button 而不是 el-button：要绝对定位盖在视频上，
               el-button 的 margin / 行高在绝对定位下会偏。
+
+              检测中时点一下弹「停止方式」选择，而不是直接停 —— 见 onAiClick 的说明。
             -->
             <button
               v-if="vision.enabled.value && previewTarget"
@@ -317,8 +319,10 @@
               class="video-ai-btn"
               :class="{ 'is-on': vision.isOn(visionKey) }"
               :disabled="!playing || vision.isPending(visionKey)"
-              :title="vision.isOn(visionKey) ? '停止这一路的 AI 检测' : '对这一路开启人形检测'"
-              @click.stop="toggleVision"
+              :title="vision.isOn(visionKey)
+                ? '这一路正在检测，点击可选择停止方式'
+                : '对这一路开启人形检测'"
+              @click.stop="onAiClick"
             >
               <el-icon :size="12"><Aim /></el-icon>
               {{ vision.isOn(visionKey) ? 'AI 检测中' : 'AI 检测' }}
@@ -439,9 +443,9 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { deviceApi, streamApi, systemApi } from '@/api'
+import { deviceApi, streamApi, systemApi, visionApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
@@ -570,6 +574,83 @@ async function toggleVision() {
   }
   const ok = await vision.toggle(key, !vision.isOn(key))
   if (ok) syncVisionWatched()
+}
+
+/**
+ * 点击画面上的 AI 按钮。
+ *
+ * <h3>为什么「检测中」时点一下不直接停，而是弹选择</h3>
+ * 这一路可能在「AI 检测」页面里被配置成<b>长期检测</b>。直接停掉只影响当前进程，
+ * 30 秒后 {@code retryPending()} 会把它重新启动 —— 用户会看到
+ * 「点了停止，过一会儿又自己开了」，以为坏了。
+ *
+ * <p>所以要把两种意图分开问清楚：
+ * <ul>
+ *   <li><b>暂时停止</b> —— 只停这一次，配置保留（重试会再开）</li>
+ *   <li><b>不再检测</b> —— 从配置里移除，重启也不再开</li>
+ * </ul>
+ * 用下拉菜单而不是确认框：确认框只能问「是/否」，问不出这两个选项。
+ */
+async function onAiClick() {
+  const key = visionKey.value
+  if (!key) return
+  if (!playing.value) {
+    ElMessage.warning('请等画面出来后再开启检测')
+    return
+  }
+  if (!vision.isOn(key)) {
+    const ok = await vision.toggle(key, true)
+    if (ok) syncVisionWatched()
+    return
+  }
+  const action = await chooseStopAction()
+  if (action === 'remove') {
+    await removeFromConfig(key)
+  } else if (action === 'pause') {
+    const ok = await vision.toggle(key, false)
+    if (ok) syncVisionWatched()
+    ElMessage.info('已停止检测（配置保留，稍后会自动恢复；如需永久关闭请选「不再检测」）')
+  }
+}
+
+/**
+ * 弹「停止方式」选择。
+ *
+ * <p>用 ElMessageBox 的三个按钮：取消 / 暂时停止 / 不再检测。
+ * 返回值 {@code null} 表示用户取消。
+ */
+function chooseStopAction() {
+  return new Promise((resolve) => {
+    ElMessageBox.confirm(
+      '这一路可能已被配置为长期检测。请选择停止方式：',
+      '停止 AI 检测',
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: '不再检测',
+        cancelButtonText: '暂时停止',
+        type: 'warning',
+        // 让「暂时停止」看起来是更轻的选择，避免误点造成配置被删
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+      .then(() => resolve('remove'))
+      .catch((a) => resolve(a === 'cancel' ? 'pause' : null))
+  })
+}
+
+/** 从配置中移除这一路（永久）。 */
+async function removeFromConfig(key) {
+  const target = previewTarget.value
+  if (!target) return
+  try {
+    await visionApi.removeChannel(target.id)
+    // 后端已 stop，但本地状态要立刻反映，否则按钮还写着「AI 检测中」
+    await vision.refreshStatus()
+    syncVisionWatched()
+    ElMessage.success('已从 AI 检测配置中移除，重启后也不会自动开启')
+  } catch (e) {
+    ElMessage.error(e.message || '移除失败')
+  }
 }
 
 /** 只轮「当前预览且已开检测」的那一路；没开检测就不轮，避免无谓请求。 */

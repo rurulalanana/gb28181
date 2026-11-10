@@ -235,6 +235,28 @@ CREATE INDEX IF NOT EXISTS idx_gb_record_plan_channel_plan
 CREATE INDEX IF NOT EXISTS idx_gb_record_plan_channel_channel
     ON gb_record_plan_channel (channel_id);
 
+-- -------------------- AI 检测通道（视觉识别） --------------------
+-- 哪些通道要跑 AI 检测。这是<b>运行期可改的配置</b>，所以落库而不是只写在
+-- application.yml 的 vision.channels 里 —— 那份是「初始种子」，只在库中该表
+-- 为空时作为默认值导入，之后以库为准（否则界面上的改动会被重启覆盖）。
+--
+-- 一行 = 一个启用的通道。停用直接删行，不留 enabled=false：
+-- 「有行即启用」比「有行且 enabled=true 才启用」少一个可忘掉的判断。
+CREATE TABLE IF NOT EXISTS gb_vision_channel (
+    id          BIGSERIAL PRIMARY KEY,
+    -- 设备编码。SDK 直连设备（大华/海康）也有，国标设备是 20 位编号。
+    device_id   VARCHAR(64),
+    -- 通道编码，ZLM 流名，也是检测的 channel 键（与前端 detections 的 channel 一致）
+    channel_id  VARCHAR(64)  NOT NULL,
+    -- 备注：为什么开这一路（人工填，便于运维回溯）
+    remark      VARCHAR(255),
+    create_time TIMESTAMP    DEFAULT NOW(),
+    -- 同一个通道只能有一条，避免重复 attach 起两个 ffmpeg
+    UNIQUE (channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gb_vision_channel_device
+    ON gb_vision_channel (device_id);
+
 -- -------------------- 设备录像目录（RecordInfo） --------------------
 
 CREATE TABLE IF NOT EXISTS gb_device_record (

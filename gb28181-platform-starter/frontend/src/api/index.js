@@ -141,7 +141,27 @@ export const visionApi = {
   /** 某路最新检测框；channel 用「设备编码/通道编码」。 */
   detections: (channel) => get('/vision/detections', { channel }),
   start: (channel) => post('/vision/start', { channel }),
-  stop: (channel) => post('/vision/stop', { channel })
+  stop: (channel) => post('/vision/stop', { channel }),
+
+  // ==================== 通道配置（管理页面用） ====================
+
+  /**
+   * 已<b>配置</b>的检测通道（含运行态）。
+   *
+   * <p>与 {@link status} 的区别：status 只报正在跑的，这个报配置过的 ——
+   * 包括「配置了但设备离线没跑起来」。管理页面需要后者，
+   * 否则用户看不到自己配过什么。
+   */
+  channels: () => get('/vision/channels'),
+  /** 新增一路检测通道（幂等：已存在时 inserted=false）。 */
+  addChannel: (deviceId, channelId, remark) =>
+    post('/vision/channels/add', {
+      device_id: deviceId,
+      channel_id: channelId,
+      remark
+    }),
+  /** 移除一路检测通道（按通道编码）。 */
+  removeChannel: (channelId) => post('/vision/channels/remove', { channel_id: channelId })
 }
 
 /** 设备录像（前端录像）接口（`/api/v1/playback/*`）。 */

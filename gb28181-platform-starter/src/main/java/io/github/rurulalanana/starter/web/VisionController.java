@@ -136,4 +136,79 @@ public class VisionController {
         data.put("wasRunning", ok);
         return ApiResponse.ok(data);
     }
+
+    // ==================== 通道配置（多选管理） ====================
+
+    /**
+     * 已配置的检测通道列表（含运行态）。
+     *
+     * <p>与 {@code /status} 的区别：{@code /status} 只报<b>正在跑</b>的通道，
+     * 这个接口报<b>配置了</b>的通道 —— 包括「配置了但设备离线没跑起来」。
+     * 管理页面需要后者，否则用户看不到自己配过什么。
+     */
+    @Operation(summary = "已配置的检测通道列表")
+    @GetMapping("/channels")
+    public ApiResponse<Map<String, Object>> channels() {
+        StpUtil.checkLogin();
+        List<Map<String, Object>> rows = visionService.listConfigured();
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("enabled", props.isEnabled());
+        data.put("available", registry.available());
+        data.put("defaultModel", registry.defaultModelId());
+        data.put("fps", props.getFps());
+        data.put("confidenceThreshold", props.getConfidenceThreshold());
+        data.put("channels", rows);
+        data.put("count", rows.size());
+        data.put("runningCount", visionService.runningCount());
+        return ApiResponse.ok(data);
+    }
+
+    /**
+     * 新增一路检测通道。
+     *
+     * <p>参数用 snake_case（与平台其它接口一致）：{@code device_id} / {@code channel_id}。
+     */
+    @Operation(summary = "新增检测通道")
+    @PostMapping("/channels/add")
+    public ApiResponse<Map<String, Object>> addChannel(
+            @RequestParam(required = false) String device_id,
+            @RequestParam String channel_id,
+            @RequestParam(required = false) String remark) {
+        StpUtil.checkLogin();
+        if (!props.isEnabled()) {
+            throw BizException.badRequest("视觉识别未启用，请先在配置中打开 vision.enabled");
+        }
+        if (!registry.available()) {
+            throw BizException.badRequest("没有可用的视觉模型，请检查 vision.models 与模型文件");
+        }
+        if (channel_id == null || channel_id.isBlank()) {
+            throw BizException.badRequest("通道编码不能为空");
+        }
+        boolean inserted = visionService.addChannel(device_id, channel_id, remark);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("channel_id", channel_id);
+        data.put("inserted", inserted);
+        data.put("msg", inserted ? "已添加" : "该通道已在列表中");
+        return ApiResponse.ok(data);
+    }
+
+    /**
+     * 移除一路检测通道。
+     *
+     * <p>按<b>通道编码</b>删除（不是「设备/通道」键）：界面上的删除按钮
+     * 针对的就是通道本身，不该因为设备编码传错而删不掉。
+     */
+    @Operation(summary = "移除检测通道")
+    @PostMapping("/channels/remove")
+    public ApiResponse<Map<String, Object>> removeChannel(@RequestParam String channel_id) {
+        StpUtil.checkLogin();
+        boolean ok = visionService.removeChannel(channel_id);
+        if (!ok) {
+            throw BizException.badRequest("该通道不在检测列表中");
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("channel_id", channel_id);
+        data.put("removed", true);
+        return ApiResponse.ok(data);
+    }
 }

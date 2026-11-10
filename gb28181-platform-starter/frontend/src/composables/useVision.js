@@ -3,39 +3,38 @@ import { ElMessage } from 'element-plus'
 import { visionApi } from '@/api'
 
 /**
- * AI 检测的开关与结果轮询。
+ * AI 检测的开关与结果获取。
  *
- * <h3>为什么用轮询而不是 WebSocket</h3>
- * 检测结果每秒更新一次（fps=1），轮询 1 秒一次的心跳开销远小于维护一条
- * 双向通道的复杂度。且 WebSocket 要处理断线重连、鉴权续期、多标签页
- * 重复订阅，收益不明显。
+ * <h3>传输方式：WebSocket 优先，轮询降级</h3>
+ * 主路径是 {@code /api/v1/vision/ws} 推送：帧一产生就发，不用对齐轮询周期，
+ * 且 16 分屏时只有一条连接（轮询是每秒 16 个 HTTP 请求，每个都要过鉴权拦截器）。
+ *
+ * <p>但 WebSocket 在三种情况下不可用，必须能自动退回轮询：
+ * 反向代理没配 {@code Upgrade} 头、企业网络拦非 HTTP 流量、服务端推送器异常。
+ * 所以这里<b>同时保留两条路径</b>：连不上或断开超过一定时间就启用轮询，
+ * 连上就停掉轮询。用户不需要知道走的是哪条。
  *
  * <h3>为什么一个 composable 而不是写在页面里</h3>
- * 直播页已经 1100 多行。检测涉及「开关状态 + 定时器 + 过期判定 + 错误降噪」，
+ * 直播页已经 1100 多行。检测涉及「开关状态 + 连接管理 + 过期判定 + 错误降噪」，
  * 塞进页面会让人不敢改。这里把状态和生命周期封起来，页面只拿
  * `toggle / boxesOf / isOn`。
  *
  * @param {object} options
- * @param {import('vue').Ref<number>} options.intervalMs 轮询间隔（默认 500ms）
+ * @param {number} options.intervalMs 降级轮询的间隔（默认 250ms）
+ * @param {boolean} options.useWebSocket 是否尝试 WebSocket（默认 true）
  * @returns 检测状态与操作方法
  */
 export function useVision(options = {}) {
   /*
-   * 轮询间隔必须比后端出帧间隔短，否则「框的延迟」里有一半是轮询在等。
+   * 降级轮询的间隔。只在 WebSocket 不可用时生效，所以取一个和后端帧率
+   * 相当的值即可 —— 此时延迟由轮询周期决定，不是主要矛盾。
    *
-   * 后端默认 fps=2（每 500ms 一帧），这里取 500ms：平均额外等待 250ms，
-   * 最坏 500ms。之前是 1000ms，叠加 1fps 的 1000ms 出帧间隔，
-   * 单帧结果最坏要 2 秒才上屏 —— 这就是「框和画面延迟挺大」的直接原因。
-   *
-   * 为什么不更短（比如 200ms）：请求频率翻 2.5 倍，而拿到的还是同一帧，
-   * 只增加服务端压力。真要更低延迟得把结果改成 WebSocket 推送，
-   * 那是另一个量级的改动，见 useVision 的类注释。
-   *
-   * <p><b>这个值必须和 vision.fps 匹配</b>：轮询比推理快，拿到的还是同一帧，
-   * 白费请求；比推理慢，则最新一帧要等下一次轮询才上屏，白白多出一段延迟。
-   * 所以 {@link refreshStatus} 会用后端返回的 fps 覆盖它（见 syncIntervalToBackend）。
+   * 会被后端返回的 fps 覆盖（见 syncIntervalToBackend）。
    */
   let intervalMs = options.intervalMs || 250
+
+  /** 是否尝试 WebSocket。 */
+  const wantWebSocket = options.useWebSocket !== false
 
   /** 后端总开关 + 模型可用性。false 时整块 UI 隐藏，而不是让人点了报错。 */
   const enabled = ref(false)
@@ -179,6 +178,188 @@ export function useVision(options = {}) {
     }
   }
 
+  // ==================== WebSocket 推送 ====================
+
+  /** 当前连接。 */
+  let socket = null
+  /** 重连定时器。 */
+  let reconnectTimer = null
+  /** 连续重连失败次数：用来做指数退避，避免服务端挂掉时疯狂重连。 */
+  let retryCount = 0
+  /** 心跳定时器。 */
+  let pingTimer = null
+  /** 连接是否已就绪（握手完成）。 */
+  const connected = ref(false)
+
+  const socketReady = () => !!socket && socket.readyState === WebSocket.OPEN
+
+  /** 拼 WebSocket 地址。token 走 query —— new WebSocket() 带不了请求头。 */
+  function socketUrl() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const token = localStorage.getItem('gb_token') || ''
+    return `${proto}//${location.host}/api/v1/vision/ws?token=${encodeURIComponent(token)}`
+  }
+
+  /** 建立连接（幂等）。 */
+  function ensureSocket() {
+    if (!wantWebSocket) return
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      return
+    }
+    let ws
+    try {
+      ws = new WebSocket(socketUrl())
+    } catch {
+      // 构造就失败（极少见）：直接降级轮询
+      fallbackToPolling()
+      return
+    }
+    socket = ws
+
+    ws.onopen = () => {
+      connected.value = true
+      retryCount = 0
+      // 连上了就不用轮询了
+      stopTimer()
+      sendWatch()
+      startPing()
+    }
+
+    ws.onmessage = (ev) => {
+      let msg
+      try {
+        msg = JSON.parse(ev.data)
+      } catch {
+        return
+      }
+      if (msg.type === 'detections' && msg.data) {
+        applyPush(msg.data)
+      }
+      // hello / watching / pong 不需要处理
+    }
+
+    ws.onerror = () => {
+      // onclose 会跟着触发，这里不重复处理
+    }
+
+    ws.onclose = () => {
+      connected.value = false
+      stopPing()
+      socket = null
+      /*
+       * 断线后要恢复轮询：否则用户看到的是「框停在那里不动」，
+       * 而实际上数据已经不再更新了 —— 比不显示更糟。
+       */
+      if (watched.length) {
+        startTimer()
+        scheduleReconnect()
+      }
+    }
+  }
+
+  /** 把推送结果写进状态。结构与 REST 完全一致，所以两条路径共用渲染逻辑。 */
+  function applyPush(data) {
+    const now = Date.now()
+    for (const [key, d] of Object.entries(data)) {
+      if (!watched.includes(key)) continue
+      const prevAt = results[key] && results[key].at
+      if (d.at !== prevAt) {
+        lastAt[key] = now
+      }
+      results[key] = d
+      stale[key] = false
+    }
+    // 收到推送说明这一路是活的，顺手刷新过期判定
+    for (const key of watched) {
+      const at = lastAt[key] || 0
+      stale[key] = at > 0 && now - at > staleAfterMs()
+    }
+  }
+
+  /** 告诉服务端要看哪些通道。 */
+  function sendWatch() {
+    if (!socketReady()) return
+    try {
+      socket.send(JSON.stringify({ action: 'watch', channels: watched }))
+    } catch {
+      // 发送失败由 onclose 兜底
+    }
+  }
+
+  /**
+   * 心跳。
+   *
+   * <p>浏览器的 WebSocket 不会自动发 ping 帧，而中间的 nginx / 云负载均衡
+   * 通常 60 秒无数据就断开连接。前端每 20 秒发一条应用层 ping，
+   * 既保活又让服务端的空闲回收不会误杀。
+   */
+  function startPing() {
+    stopPing()
+    pingTimer = setInterval(() => {
+      if (!socketReady()) return
+      try {
+        socket.send(JSON.stringify({ action: 'ping' }))
+      } catch {
+        // 忽略
+      }
+    }, 20_000)
+  }
+
+  function stopPing() {
+    if (pingTimer) {
+      clearInterval(pingTimer)
+      pingTimer = null
+    }
+  }
+
+  /**
+   * 安排重连（指数退避，封顶 10 秒）。
+   *
+   * <p>为什么不一断开就立刻重连：服务端重启 / 网络中断时，立即重连会
+   * 变成每秒几十次握手，反而拖慢恢复。1s → 2s → 4s → 8s → 10s 封顶，
+   * 既能快速恢复，又不会打爆服务端。
+   */
+  function scheduleReconnect() {
+    if (reconnectTimer || !watched.length || !wantWebSocket) return
+    const delay = Math.min(10_000, 1000 * Math.pow(2, retryCount))
+    retryCount++
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (watched.length) ensureSocket()
+    }, delay)
+  }
+
+  /** 关闭连接（页面卸载 / 没有要看的通道时）。 */
+  function closeSocket() {
+    stopPing()
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    retryCount = 0
+    if (socket) {
+      const s = socket
+      socket = null
+      connected.value = false
+      // 先摘掉回调，避免主动关闭时触发重连
+      s.onopen = null
+      s.onmessage = null
+      s.onerror = null
+      s.onclose = null
+      try {
+        s.close()
+      } catch {
+        // 已经关了
+      }
+    }
+  }
+
+  /** WebSocket 不可用时退回轮询。 */
+  function fallbackToPolling() {
+    if (!watched.length) return
+    startTimer()
+  }
+
   /**
    * 启动轮询。
    *
@@ -234,6 +415,25 @@ export function useVision(options = {}) {
     }
     if (!next.length) {
       stopTimer()
+      // 没有要看的通道：断开连接，别让服务端白推
+      closeSocket()
+      return
+    }
+    /*
+     * 优先走 WebSocket：它不受轮询周期限制，帧产生即到。
+     *
+     * 如果连接没就绪（正在握手 / 刚断开在重连），先打一次 REST 兜底，
+     * 保证「开启检测后立刻能看到框」，而不是等连接建立。
+     */
+    if (wantWebSocket) {
+      ensureSocket()
+      sendWatch()
+    }
+    if (socketReady()) {
+      // 已连上：轮询不需要了
+      stopTimer()
+      // 但首帧仍要立刻取一次，否则要等下一次推送（最多 200ms）
+      pollDetections()
       return
     }
     /*
@@ -242,9 +442,6 @@ export function useVision(options = {}) {
      * 顺序看起来无所谓，其实影响「开启后多久看到第一个框」：
      * startTimer 是「等 intervalMs 后才第一次请求」，所以必须紧跟着
      * 手动 pollDetections() 打头阵，否则第一帧要白等一个周期。
-     *
-     * 反过来（先 poll 后 startTimer）也可以，但 poll 是异步的，
-     * 期间若 setWatched 被再次调用会并发两个请求 —— 先起定时器更稳。
      */
     startTimer()
     pollDetections()
@@ -278,11 +475,19 @@ export function useVision(options = {}) {
         next.add(key)
         runningKeys.value = next
         /*
-         * 立刻开始轮询，别等 setWatched 被下一帧画面事件触发。
+         * 立刻取一次，别等 setWatched 被下一帧画面事件触发。
          * 首帧本来就要等 ffmpeg 起流（低延迟参数下约 0.3~0.7 秒），
-         * 再让前端多等一个轮询周期没有意义。
+         * 再让前端多等一个推送节拍没有意义。
+         *
+         * 这里<b>总是</b>用 REST 取一次，不管 WebSocket 是否已连上：
+         * 推送有 200ms 节拍，而这一帧是「用户点了按钮」的直接反馈，
+         * 用一次 HTTP 换取即时响应是值得的。后续更新交给推送。
          */
-        if (watched.includes(key)) pollDetections()
+        if (watched.includes(key)) {
+          ensureSocket()
+          sendWatch()
+          pollDetections()
+        }
         ElMessage.success('已开启 AI 检测，画面出现目标后会实时框出')
       } else {
         await visionApi.stop(key)
@@ -309,12 +514,21 @@ export function useVision(options = {}) {
 
   onUnmounted(() => {
     stopTimer()
+    closeSocket()
   })
 
-  // 后端总开关关掉时，不要再轮询（否则每秒一次 400 错误）
+  // 后端总开关关掉时，不要再轮询/推送（否则每秒一次 400 错误）
   watch(enabled, (v) => {
-    if (!v) stopTimer()
-    else if (watched.length) startTimer()
+    if (!v) {
+      stopTimer()
+      closeSocket()
+    } else if (watched.length) {
+      if (wantWebSocket) {
+        ensureSocket()
+        sendWatch()
+      }
+      startTimer()
+    }
   })
 
   return {
@@ -322,6 +536,8 @@ export function useVision(options = {}) {
     available,
     runningKeys,
     anyRunning,
+    /** 是否走 WebSocket 推送（false 表示降级到轮询，排障时有用）。 */
+    connected,
     isOn,
     isStale,
     isPending,

@@ -22,7 +22,10 @@ export const ICON_OPTIONS = [
   'Odometer', 'VideoCamera', 'Monitor', 'List', 'Film', 'Cloudy', 'Bell', 'Share',
   'User', 'Key', 'Document', 'Setting', 'Cpu', 'DataLine', 'Folder', 'Files',
   'Camera', 'Location', 'MapLocation', 'Lock', 'Menu', 'Grid', 'Histogram',
-  'Picture', 'Postcard', 'Ticket', 'TrendCharts', 'View', 'Warning'
+  'Picture', 'Postcard', 'Ticket', 'TrendCharts', 'View', 'Warning',
+  // AI 检测用 Aim（准星）：比 Cpu 更直观地表达「识别目标」，
+  // 而 Cpu 在运维人员眼里是「处理器负载」，容易误解成性能监控。
+  'Aim'
 ]
 
 /* 免登录的对外页面（不进菜单表，也不参与权限过滤）。 */
@@ -72,6 +75,7 @@ export const SEED_PAGES = [
   { name: 'cloud-detail-list', path: '/cloud/detail/list', component: 'views/CloudRecordListView.vue', title: '云端录像列表', group: 'g-cloud', perm: 'cloud:read', hidden: true },
   { name: 'cloud-plans', path: '/cloud/plans', component: 'views/CloudRecordPlanView.vue', title: '录像计划', group: 'g-cloud', perm: 'cloud:read', hidden: true },
   { name: 'alarms', path: '/alarms', component: 'views/AlarmView.vue', title: '报警管理', icon: 'Bell', group: 'g-ops', perm: 'alarm:read' },
+  { name: 'vision', path: '/vision', component: 'views/VisionView.vue', title: 'AI 检测', icon: 'Aim', group: 'g-ops', perm: 'system:read' },
   { name: 'cascade', path: '/cascade', component: 'views/CascadeView.vue', title: '级联配置', icon: 'Share', group: 'g-ops', perm: 'cascade:read' },
   { name: 'users', path: '/users', component: 'views/UserView.vue', title: '用户管理', icon: 'User', group: 'g-system', perm: 'user:read' },
   { name: 'roles', path: '/roles', component: 'views/RoleView.vue', title: '角色权限', icon: 'Key', group: 'g-system', perm: 'user:read' },
@@ -84,7 +88,7 @@ export const SEED_PAGES = [
  * 种子版本。只在 SEED_PAGES / DEFAULT_GROUP_TITLES 增删条目时改：版本一致时
  * /menu/sync 是空操作，不会把运维删掉的行种回来。改标题/图标/排序请在菜单管理页操作。
  */
-export const MENU_SEED_VERSION = '2026-11-01.2'
+export const MENU_SEED_VERSION = '2026-11-10.1'
 
 /**
  * 把种子摊平成 gb_menu 行（目录 + 菜单，不含按钮）。
