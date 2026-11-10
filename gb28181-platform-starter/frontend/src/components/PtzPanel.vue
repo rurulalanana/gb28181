@@ -27,7 +27,7 @@
         class="ptz-btn ptz-talk"
         :class="{ 'is-talking': talking }"
         :type="talking ? 'danger' : 'default'"
-        :loading="isSdkDevice && talk.starting"
+        :loading="isDahua && talk.starting"
         :disabled="noTalk"
         :title="talkTip"
         :aria-label="talkTip"
@@ -1167,6 +1167,15 @@ const props = defineProps({
 
 /** 是否 SDK 直连设备（当前只有大华）。 */
 const isSdkDevice = computed(() => !!props.source && props.source !== 'gb28181')
+
+/**
+ * 是否走大华的 NetSDK 对讲。
+ *
+ * <p><b>不能用 {@code isSdkDevice}</b>：海康也是 SDK 直连，但没有对讲接口 ——
+ * 按 isSdkDevice 分流会把海康设备也送去 {@code /dahua/talk/start}，报一个
+ * 与设备无关的错。对讲只认 {@code source === 'dahua'}。
+ */
+const isDahua = computed(() => props.source === 'dahua')
 /**
  * 相机参数表单忙碌标记。
  *
@@ -3278,7 +3287,7 @@ async function toggleTalk() {
     ElMessage.warning('请先选择通道')
     return
   }
-  if (isSdkDevice.value) {
+  if (isDahua.value) {
     await toggleDahuaTalk()
     return
   }
@@ -3327,7 +3336,7 @@ const talk = reactive({
  * <p>国标与大华是两条通路（见下面 toggleTalk / startDahuaTalk 的注释），
  * 但对用户就是「一个麦克风按钮」，所以状态在这里合成，按钮不区分设备类型。
  */
-const talking = computed(() => (isSdkDevice.value ? talk.active : gbTalking.value))
+const talking = computed(() => (isDahua.value ? talk.active : gbTalking.value))
 
 /**
  * 中心键的禁用条件。
@@ -3343,7 +3352,7 @@ const talking = computed(() => (isSdkDevice.value ? talk.active : gbTalking.valu
  * 于是<b>只能开始、不能停止</b>，用户只能去关掉整个预览弹窗（实测踩过）。
  */
 const noTalk = computed(() => {
-  if (isSdkDevice.value) {
+  if (isDahua.value) {
     if (!props.serial || talk.starting) return true
     // 自己占着的时候 busy 也是 true，这时必须允许点（点了是「停止」或「恢复」）
     return talk.busy && !talk.busySelf
@@ -3353,7 +3362,7 @@ const noTalk = computed(() => {
 
 /** 中心键的悬停提示。顺序很重要：active 优先于 busy，否则「停止」永远显示不出来。 */
 const talkTip = computed(() => {
-  if (isSdkDevice.value) {
+  if (isDahua.value) {
     if (!props.serial) return '请先选择通道'
     if (talk.starting) return '正在建立通道…'
     if (talk.active) return '停止对讲'
@@ -3372,7 +3381,7 @@ const talkTip = computed(() => {
  * 否则会反复点击（每次点击都要重建通道，设备侧会更慢）。
  */
 const talkStatus = computed(() => {
-  if (!isSdkDevice.value) return ''
+  if (!isDahua.value) return ''
   if (talk.starting) return '正在建立通道…'
   if (talk.busy && !talk.busySelf) return `${talk.busyOwner || '他人'} 正在喊话，稍后再试`
   if (!talk.active) return ''
@@ -3401,7 +3410,7 @@ const TALK_SAMPLE_RATE = 8000
 const TALK_CHUNK_BYTES = 3200
 
 async function refreshTalkBusy() {
-  if (!isSdkDevice.value || !props.serial || disposed) return
+  if (!isDahua.value || !props.serial || disposed) return
   try {
     const res = await dahuaApi.talkBusy({ serial: props.serial })
     if (disposed) return

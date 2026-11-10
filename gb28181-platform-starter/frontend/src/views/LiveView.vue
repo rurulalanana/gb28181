@@ -221,10 +221,17 @@
             <div v-if="ptzTile.ptzType === 3" class="ptz-note">
               该通道标记为固定枪机，云台指令可能不被设备支持
             </div>
+            <!--
+              source 必须传：PtzPanel 靠它区分国标与大华直连。
+              漏了这一步，大华设备的中心麦克风会走国标 /control/talk，
+              用户看到的是「该设备通过 dahua 接入，不支持语音喊话」——
+              而这个按钮明明就是给对讲用的（实测踩过）。
+            -->
             <PtzPanel
               :key="ptzTile.id"
               :serial="ptzTile.serial"
               :code="ptzTile.code"
+              :source="ptzTile.source"
               :disabled="ptzTile.ptzType === 3"
               simple
             />
@@ -504,6 +511,8 @@ const tiles = ref(
     serial: '',
     code: '',
     channelName: '',
+    /** 设备接入方式（gb28181 / dahua），云台面板据此选协议。 */
+    source: '',
     /** 通道的云台类型：3（固定枪机）时右侧云台面板置灰。 */
     ptzType: 0,
     state: '未选择通道',
@@ -761,6 +770,8 @@ function applyChannel(tile, channel) {
   tile.code = channel.id
   tile.channelName = channel.customName || channel.name || channel.id
   tile.ptzType = channel.ptzType || 0
+  // 通道列表带 source（ChannelVo.source）；缺省按国标处理，与改造前行为一致
+  tile.source = channel.source || ''
 }
 
 async function playTile(tile) {

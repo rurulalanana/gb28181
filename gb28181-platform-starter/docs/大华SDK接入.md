@@ -542,6 +542,18 @@ $ ffmpeg -i http://127.0.0.1:48089/10001/10001-1.live.flv -af volumedetect -vn -
 > 上行方向按协商的 `nPacketPeriod`（25 ms = 400 字节）切片后再
 > `CLIENT_TalkSendData`，不要一次丢 200 ms 整块。
 
+### 9.8.2 每个用到 `PtzPanel` 的页面都必须传 `source`
+
+`PtzPanel` 靠 prop `source` 选协议（`gb28181` / `dahua`），而它的默认值是
+`'gb28181'` —— **漏传不报错，只是静默走国标分支**。表现是：
+
+> 该设备通过 dahua 接入，不支持「语音喊话」；SDK 直连设备的语音对讲走
+> /api/v1/dahua/talk/start（设备音频通道），与国标 Broadcast 不是同一套
+
+实时预览页（`LiveView.vue`）就漏传过，同一台设备在通道管理页能对讲、
+在电视墙页不能。新增用到 `PtzPanel` 的页面时，第一件事是把 `source` 接上；
+数据来源是通道列表的 `ChannelVo.source`（`gb28181` / `dahua`）。
+
 ## 10. 尚未解决
 
 - **无大华真机**：已验证「原生库从 jar 解压 → `CLIENT_Init` 成功 →
