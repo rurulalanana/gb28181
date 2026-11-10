@@ -31,10 +31,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * 上行（浏览器 → 设备）：<b>裸 PCM，8 kHz / 16 bit / 单声道</b>，原样
  * {@code TalkSendData}，服务端不转码。
  *
- * <p>下行（设备 → 浏览器）：大华回传的是 <b>DHAV 打包</b>的音频帧
- * （每帧 2096 字节 = 20 字节帧头 + 2076 字节 PCM16，约 130 ms）。
- * 帧头必须剥掉再下发，否则浏览器会把 {@code "DHAV"} 头当成采样点，
- * 每 130 ms 爆一次音。剥头见 {@link #stripAudioHeader}。
+ * <p>下行（设备 → 浏览器）：大华回传的是 <b>DHAV 打包</b>的音频帧，
+ * 每帧 2096 字节，结构见 {@link #stripAudioHeader}。头尾都必须剥掉 ——
+ * 少剥一个字节，浏览器就会把帧头当成采样点，每帧爆一次音（现场听感是「放鞭炮」）。
  */
 @Slf4j
 @Service
@@ -55,8 +54,19 @@ public class DahuaTalkService {
     /** 声道数：设备对讲只支持单声道。 */
     public static final int CHANNELS = 1;
 
-    /** DHAV 音频帧头长度（实测）。见 {@link #stripAudioHeader}。 */
-    private static final int DHAV_AUDIO_HEADER = 20;
+    /**
+     * 对讲下行 DHAV 帧的头部长度（字节，实测）。
+     *
+     * <p><b>不是 20。</b>早期按「20 字节帧头」实现，现场听到的是持续的鞭炮声 ——
+     * 因为剩下 28 字节（20 字节内层头 + 8 字节尾）被当成 14 个采样点推进了播放队列，
+     * 每 128 ms 一记满幅跳变（实测帧边界跳变平均 18128，修好后是 1）。
+     *
+     * <p>见 {@link #stripAudioHeader}。
+     */
+    private static final int DHAV_AUDIO_HEADER = 40;
+
+    /** 帧尾的 8 字节："dhav" + uint32 帧长。 */
+    private static final int DHAV_AUDIO_TRAILER = 8;
 
     private final DahuaCapabilityService dahuaCapability;
 
@@ -135,42 +145,74 @@ public class DahuaTalkService {
     }
 
     /**
-     * 剥掉 DHAV 音频帧头，只留裸 PCM。
+     * 剥掉 DHAV 音频帧的「头 + 尾」，只留裸 PCM。
      *
-     * <p><b>为什么必须剥</b>：设备回传帧以 ASCII {@code "DHAV"} 开头
-     * （{@code NET_ENCODE_AUDIO_INFO.nFrameType} 默认 0 = DHAV 打包），
-     * 后面跟 16 字节头部字段，之后才是 PCM16。整帧丢给浏览器播放，
-     * 头部会被当成 8 个采样点（{@code 0x4448} 之类的满幅值）→ 每 130 ms 一声爆音。
-     *
-     * <p>实测帧结构（同一台 IPC，8 帧一致）：
+     * <h3>实测帧结构（2026-11，IPC，逐帧取 hex 校验过 63 帧）</h3>
      * <pre>
-     *   [0..4)   "DHAV"
-     *   [4..8)   F0 00 00 00     固定
-     *   [8..12)  帧序号（逐帧 +1）
-     *   [12..16) 帧总长（LE，2096）
-     *   [16..20) 时间戳（逐帧递增）
-     *   [20..)   裸 PCM16，2076 字节 ≈ 129.75 ms @ 8 kHz
+     *   2096 字节 / 帧
+     *   [0..4)      "DHAV"                         大写 magic
+     *   [0..40)     头部（外层 20 字节 + 内层 20 字节，内层每帧形状相同）
+     *   [40..2088)  裸 PCM16，<b>2048 字节 = 1024 采样点 = 128.00 ms</b> @ 8 kHz
+     *   [2088..2096) 尾部 "dhav" + uint32 帧长(2096)  小写 magic
      * </pre>
      *
-     * <p>不是 DHAV 帧（没有 magic）时原样返回 —— 换型号/换固件时若改成 PS 封装，
-     * 这里会自动退化成「整帧透传」，不会把有效数据切掉。
+     * <h3>为什么必须头尾都剥（这是「对讲听到放鞭炮」的根因）</h3>
+     * 原先按「20 字节头」实现，每帧会多留 28 字节（20 字节内层头 + 8 字节尾）。
+     * 那 28 字节被浏览器当成 14 个采样点，全是接近满幅的跳变：
+     *
+     * <pre>
+     *   修复前：帧边界跳变 平均 18128、最大 22029（62/62 帧都跳）
+     *   修复后：帧边界跳变 平均 1、    最大 3      （0 帧跳）
+     * </pre>
+     *
+     * 2096/8000 = 262 ms 的帧，每帧在听感上就是一记「啪」，7.6 帧/秒 → 连续鞭炮声。
+     * 少剥 8 字节同样会响：帧尾的 {@code "dhav"} 是 {@code 0x7661_6864} 量级的满幅值。
+     *
+     * <p><b>不对号就返回 {@code null}（丢弃），不要整帧透传。</b>
+     * 帧结构变了说明我们对这份数据的理解是错的，透传只会把噪音放大给用户的耳朵 ——
+     * 「安静」比「响亮的错误」好排查得多。丢弃时会打一次带 hex 的日志留证据。
+     *
+     * @return 裸 PCM16（8 kHz/16 bit/单声道）；结构与实测不符时返回 {@code null}
      */
     public static byte[] stripAudioHeader(byte[] frame) {
-        if (frame == null || frame.length <= DHAV_AUDIO_HEADER) {
-            return frame;
+        if (frame == null || frame.length <= DHAV_AUDIO_HEADER + DHAV_AUDIO_TRAILER) {
+            return null;
         }
-        boolean dahv = frame[0] == 'D' && frame[1] == 'H' && frame[2] == 'A' && frame[3] == 'V';
-        if (!dahv) {
-            return frame;
+        if (!isMagic(frame, 0, MAJOR_MAGIC)) {
+            // 最常见的原因：固件改成别的封装了。原样返回会把整帧当 PCM 播成噪音
+            return null;
         }
-        int payload = frame.length - DHAV_AUDIO_HEADER;
-        // 16 bit 采样，载荷必须是偶数长度；否则说明帧结构变了，宁可不切
+        int end = frame.length;
+        // 尾部 magic 是「有小写 dhav」的标志；没有就按「无尾」处理（部分固件）
+        if (isMagic(frame, end - DHAV_AUDIO_TRAILER, MINOR_MAGIC)) {
+            end -= DHAV_AUDIO_TRAILER;
+        }
+        int payload = end - DHAV_AUDIO_HEADER;
+        // 16 bit 采样，载荷必须是偶数长度；奇数说明切歪了，宁可不播
         if (payload <= 0 || payload % 2 != 0) {
-            return frame;
+            return null;
         }
         byte[] pcm = new byte[payload];
         System.arraycopy(frame, DHAV_AUDIO_HEADER, pcm, 0, payload);
         return pcm;
+    }
+
+    /** 帧头 magic：{@code "DHAV"}。 */
+    private static final byte[] MAJOR_MAGIC = {'D', 'H', 'A', 'V'};
+
+    /** 帧尾 magic：{@code "dhav"}（小写，与大写头区分）。 */
+    private static final byte[] MINOR_MAGIC = {'d', 'h', 'a', 'v'};
+
+    private static boolean isMagic(byte[] d, int off, byte[] magic) {
+        if (off < 0 || off + magic.length > d.length) {
+            return false;
+        }
+        for (int i = 0; i < magic.length; i++) {
+            if (d[off + i] != magic[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -331,9 +373,18 @@ public class DahuaTalkService {
                 return;
             }
             byte[] pcm = stripAudioHeader(frame);
+            if (pcm == null) {
+                // 结构对不上：丢掉，并且只留一次证据（含原始 hex），不要刷屏
+                if (headerLogged.compareAndSet(false, true)) {
+                    log.warn("对讲下行音频结构无法识别，已丢弃（帧 {} 字节，头尾 hex: {} ... {}）",
+                            frame.length, hex(frame, 0, 8), hex(frame, frame.length - 8, 8));
+                }
+                return;
+            }
             if (headerLogged.compareAndSet(false, true)) {
-                log.info("对讲下行音频: 帧 {} 字节 → 剥头后 {} 字节（PCM {} Hz/{} bit/{} 声道）",
-                        frame.length, pcm.length, SAMPLE_RATE, AUDIO_BIT, CHANNELS);
+                log.info("对讲下行音频: 帧 {} 字节 → 剥头尾后 {} 字节（{} 采样点 / {} ms，PCM {} Hz/{} bit/{} 声道）",
+                        frame.length, pcm.length, pcm.length / 2,
+                        pcm.length / 2 * 1000 / SAMPLE_RATE, SAMPLE_RATE, AUDIO_BIT, CHANNELS);
             }
             for (java.util.function.Consumer<byte[]> sink : sinks) {
                 try {
@@ -342,6 +393,20 @@ public class DahuaTalkService {
                     // 单个接收端异常不能影响其它人，更不能抛回原生线程
                 }
             }
+        }
+
+        /** 取 {@code [from, from+n)} 的十六进制串，用于日志取证。 */
+        private static String hex(byte[] d, int from, int n) {
+            int start = Math.max(0, from);
+            int end = Math.min(d.length, start + n);
+            StringBuilder sb = new StringBuilder((end - start) * 3);
+            for (int i = start; i < end; i++) {
+                sb.append(String.format("%02X", d[i]));
+                if (i + 1 < end) {
+                    sb.append(' ');
+                }
+            }
+            return sb.toString();
         }
 
         void touch() {

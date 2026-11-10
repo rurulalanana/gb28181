@@ -1738,6 +1738,10 @@ public final class DahuaExtAccess {
     /** 大华建议的打包周期（毫秒），决定 TalkSendData 推帧的节奏。 */
     public static final int TALK_PACKET_PERIOD_MS = 25;
 
+    /** 一个打包周期的字节数：25 ms × 8000 Hz × 16 bit × 1 声道。 */
+    public static final int TALK_PACKET_BYTES =
+            TALK_SAMPLE_RATE * TALK_AUDIO_BIT / 8 * TALK_PACKET_PERIOD_MS / 1000;
+
     /**
      * 对讲通道。
      *
@@ -1763,20 +1767,37 @@ public final class DahuaExtAccess {
         }
 
         /**
-         * 发一帧音频。
+         * 发一段音频。
          *
          * <p>数据格式必须与设备协商结果一致 —— 传 MP3/AAC 原始帧是发不出去的，
          * 大华要的是裸 PCM 或 G711 帧。调用方负责重采样到 8 kHz 单声道。
          *
-         * @return SDK 返回值（非 0 表示成功，具体语义按 SDK 版本）
+         * <p><b>按协商的打包周期切片</b>：{@code NET_TALK_ENCODE_TYPE} 里报的是
+         * {@link #TALK_PACKET_PERIOD_MS} ms（= {@value #TALK_PACKET_BYTES} 字节 @ 8 kHz/16 bit），
+         * 浏览器一次 POST 200 ms 是为了少发请求，但直接把这 200 ms 整块丢给
+         * {@code TalkSendData} 与「每包 25 ms」的口径不符 —— 设备按 25 ms 的节奏取数据，
+         * 一次给 8 包的量会让喇叭出来的声音断续、发闷。
+         *
+         * @return 成功发送的字节数；{@code 0} 表示失败
          */
         public long send(byte[] pcm) {
             if (pcm == null || pcm.length == 0) {
                 return 0;
             }
-            Memory memory = new Memory(pcm.length);
-            memory.write(0, pcm, 0, pcm.length);
-            return requireSdk().CLIENT_TalkSendData(handle, memory, pcm.length).longValue();
+            NetSDKLib sdk = requireSdk();
+            int sent = 0;
+            for (int off = 0; off < pcm.length; off += TALK_PACKET_BYTES) {
+                int len = Math.min(TALK_PACKET_BYTES, pcm.length - off);
+                Memory memory = new Memory(len);
+                memory.write(0, pcm, off, len);
+                long ret = sdk.CLIENT_TalkSendData(handle, memory, len).longValue();
+                if (ret == 0) {
+                    // 第一包就失败：可能是设备刚断开，直接返回让调用方感知
+                    return sent;
+                }
+                sent += len;
+            }
+            return sent;
         }
 
         @Override
