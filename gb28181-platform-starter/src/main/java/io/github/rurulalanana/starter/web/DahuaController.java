@@ -121,7 +121,8 @@ public class DahuaController {
                     "上限 = 云台当前所在位置。请先把球机转到想要的上限角度再点设置；"
                             + "设置后需打开「启用」开关才生效";
             case "limit-down" ->
-                    "这台设备的固件只在 PtzLimit 里提供 UpLimit，没有 DownLimit 字段，平台无法写入下限";
+                    "下限 = 云台当前所在位置。请先把球机转到想要的下限角度再点设置；"
+                            + "设置后需打开「启用」开关才生效";
             case "reboot" -> "云台重启会短暂离线（镜头回中），属正常现象";
             default -> "指令已下发；云台动作是异步的，以画面为准";
         };
@@ -237,6 +238,39 @@ public class DahuaController {
             @RequestParam(required = false) String code) {
         StpUtil.checkLogin();
         return ApiResponse.ok(ptzConfigService.read(serial, code));
+    }
+
+    /**
+     * 临时诊断：原样返回某个配置项的全部扁平键值。
+     *
+     * <p>排查「设备到底有没有这个字段」时用 —— 解析层只挑它认识的键，
+     * 认不出的静默丢弃，光看解析结果看不出设备返回了什么。
+     */
+    @Operation(summary = "诊断：读取配置项原始键值")
+    @GetMapping("/ptz/raw")
+    public ApiResponse<Map<String, String>> ptzRaw(
+            @RequestParam String serial,
+            @RequestParam(required = false) String code,
+            @RequestParam String name) {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(ptzConfigService.rawConfig(serial, code, name));
+    }
+
+    /**
+     * 诊断：读云台当前物理位置（Pan / Tilt / Zoom）。
+     *
+     * <p>设置旋转限位是「以当前位置为边界」，所以排查限位问题必须先知道当前位置。
+     * 位置恰好是 {@code tilt=0} 时，写进去的边界值和出厂值相同，
+     * 回读无法区分「写成功」与「没写进去」—— 这时要先把云台转到别处再设。
+     */
+    @Operation(summary = "诊断：读取云台当前位置")
+    @GetMapping("/ptz/position")
+    public ApiResponse<Map<String, Object>> ptzPosition(
+            @RequestParam String serial,
+            @RequestParam(required = false) String code) {
+        StpUtil.checkLogin();
+        String channel = (code == null || code.isBlank()) ? serial : code;
+        return ApiResponse.ok(capability.ptzPositionOf(serial, channel));
     }
 
     /**

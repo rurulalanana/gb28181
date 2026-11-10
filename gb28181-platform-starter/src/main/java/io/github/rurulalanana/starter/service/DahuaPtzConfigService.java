@@ -329,6 +329,17 @@ public class DahuaPtzConfigService {
                 cfgChannel(deviceId, channelCode));
     }
 
+    /**
+     * 临时诊断：原样返回某个配置项的全部扁平键值。
+     *
+     * <p>用来确认「设备到底有没有某个字段」这类问题 ——
+     * 解析层只挑它认识的键，认不出的会被静默丢掉，
+     * 光看解析结果是看不出「设备返回了什么」的。
+     */
+    public Map<String, String> rawConfig(String deviceId, String channelCode, String name) {
+        return readOrEmpty(deviceId, cfgChannel(deviceId, channelCode), name);
+    }
+
     // ==================== 写：巡航组 ====================
 
     /**

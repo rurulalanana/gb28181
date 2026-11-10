@@ -201,31 +201,33 @@ public class DahuaCapabilityService {
      * {@code 0x8000004F 设备不支持该操作}。
      *
      * <h3>实际可行的做法：读位置 → 写配置字段</h3>
-     * {@code PtzLimit} 配置项的结构（SDK 读回的原文）：
+     * {@code PtzLimit} 配置项的完整结构（SDK 读回的原文，实测 keys=6）：
      * <pre>
      * {"Enable": false, "HorizontalLimitEnable": false,
-     *  "UpLimit": {"Boundary": 0, "Enable": true}}
+     *  "UpLimit":   {"Boundary": 0, "Enable": true},
+     *  "DownLimit": {"Boundary": 0, "Enable": true}}
      * </pre>
-     * 所以「设上限」= 把当前 {@code tilt} 写进 {@code UpLimit.Boundary}。实测有效：
+     * 所以「设边界」= 把当前 {@code tilt} 写进对应边的 {@code Boundary}。实测有效：
      * <pre>
-     *   写入 Boundary=-150 → 读回 -150
-     *   Enable=true 后向上转 3 秒 → tilt 恒为 -150（云台被挡住）
+     *   写入 UpLimit.Boundary=-150   → 读回 -150
+     *   Enable=true 后向上转 3 秒    → tilt 恒为 -150（云台被挡住）
      * </pre>
      * 这与设备界面的行为一致（界面也是「以当前位置为边界」）。
      *
-     * <p><b>下限做不了</b>：这台固件的 {@code PtzLimit} 只有 {@code UpLimit}，
-     * 没有 {@code DownLimit}（凭空写一个不存在的子对象会被设备忽略）。所以下限如实报不支持，
-     * 不让用户以为点了会生效。
+     * <h3>⚠️ 曾经的错误结论</h3>
+     * 早期这里只有 {@code UpLimit} 分支，{@code upper=false} 直接抛异常，注释写着
+     * 「这台固件的 PtzLimit 只有 UpLimit，没有 DownLimit」。
+     * <b>那是错的</b> —— 当时的判据是「写 DownLimit 后没生效」，
+     * 但真正的原因是整项写入时 payload 形状不对（包了多余的 {@code params.table} 外壳），
+     * 设备返回 true 却把值丢掉了，看起来就像「字段不存在」。
      *
-     * @param upper {@code true} 设上限，{@code false} 设下限（本型号不支持）
+     * <p>用 {@code /ptz/raw?name=PtzLimit} 读原始键值就能一眼看穿：
+     * {@code DownLimit.Boundary} 与 {@code DownLimit.Enable} 都在。
+     * <b>「写入没生效」不等于「字段不存在」</b>，这两件事必须用读回原文来区分。
+     *
+     * @param upper {@code true} 设上限，{@code false} 设下限
      */
     public Map<String, Object> setRotateLimitBoundary(DahuaSdk.Session session, int channel, boolean upper) {
-        if (!upper) {
-            throw BizException.badRequest(
-                    "这台设备的固件只在 PtzLimit 里提供了「上限」字段，没有「下限」，"
-                            + "所以平台无法设置旋转下限。"
-                            + "设备自己的 Web 界面「PTZ旋转限制」页如果显示了下限，请在那里设置一次。");
-        }
         Map<String, Object> pos = ptzPosition(session, channel);
         if (pos.get("tilt") == null) {
             throw BizException.badRequest("读不到云台当前位置：" + pos.get("error"));
@@ -240,19 +242,65 @@ public class DahuaCapabilityService {
         if (!(business instanceof com.fasterxml.jackson.databind.node.ObjectNode obj)) {
             throw BizException.badRequest("PtzLimit 的结构与预期不符，拒绝写入");
         }
-        com.fasterxml.jackson.databind.JsonNode up = obj.get("UpLimit");
-        if (!(up instanceof com.fasterxml.jackson.databind.node.ObjectNode upObj)) {
-            throw BizException.badRequest("PtzLimit 里没有 UpLimit 字段（该型号可能不支持旋转限制）");
+        String side = upper ? "UpLimit" : "DownLimit";
+        com.fasterxml.jackson.databind.JsonNode node = obj.get(side);
+        if (!(node instanceof com.fasterxml.jackson.databind.node.ObjectNode sideObj)) {
+            /*
+             * 设备读回里没有这一边，说明该型号确实不支持。
+             * 这时如实报错，不要凭空构造一个子对象写进去 ——
+             * 设备会忽略未知子对象，用户以为设置成功却毫无效果。
+             */
+            throw BizException.badRequest(
+                    "这台设备的 PtzLimit 里没有 " + side + " 字段，无法设置旋转"
+                            + (upper ? "上限" : "下限"));
         }
-        upObj.put("Boundary", tilt);
-        ext().writeRaw(session, "PtzLimit", channel,
-                io.github.rurulalanana.dahua.internal.DahuaJson.write(obj));
-        log.info("旋转上限已设为当前位置: device channel={} tilt={}", channel, tilt);
+        sideObj.put("Boundary", tilt);
+        String payload = io.github.rurulalanana.dahua.internal.DahuaJson.write(obj);
+        log.info("DIAG PtzLimit 写入 payload: {}", payload);
+        ext().writeRaw(session, "PtzLimit", channel, payload);
+        /*
+         * 写后回读校验。
+         *
+         * <p>SDK 的 {@code CLIENT_SetNewDevConfig} 返回 true <b>不代表值改了</b> ——
+         * 实测这台设备对 payload 形状不对的写入会返回成功却丢弃内容。
+         * 不回读就会重演「接口回 ok、界面刷新后还是旧值」，
+         * 而这次更糟：用户会以为限位设好了，实际云台照样转过去。
+         */
+        String verify;
+        try {
+            String after = ext().readConfig(session, "PtzLimit", channel);
+            com.fasterxml.jackson.databind.JsonNode b =
+                    io.github.rurulalanana.dahua.internal.DahuaJson.business(after);
+            com.fasterxml.jackson.databind.JsonNode n = b == null ? null : b.get(side);
+            verify = n == null ? null : n.path("Boundary").asText(null);
+            log.info("DIAG PtzLimit 回读 {}.Boundary = {}", side, verify);
+        } catch (Exception e) {
+            log.warn("PtzLimit 回读校验失败（不影响已下发的写入）: {}", e.getMessage());
+            verify = null;
+        }
+        if (verify != null && !String.valueOf(tilt).equals(verify.trim())) {
+            throw BizException.badRequest(
+                    "设备接受了指令但" + (upper ? "上限" : "下限") + "没有变化（回读仍是 " + verify + "）。"
+                            + "这台固件可能不支持用这种方式设置该边界。");
+        }
+        log.info("旋转{}已设为当前位置: channel={} tilt={}", upper ? "上限" : "下限", channel, tilt);
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("boundary", tilt);
         out.put("tilt", tilt);
         out.put("pan", pos.get("pan"));
         return out;
+    }
+
+    /**
+     * 读云台当前位置（供诊断接口用）。
+     *
+     * <p>设置旋转限位是「以当前位置为边界」，排查限位问题时必须先知道当前位置 ——
+     * 位置恰好是 {@code tilt=0} 时，写进去的边界值和出厂值相同，
+     * 回读无法区分「写成功」与「没写进去」。
+     */
+    public java.util.Map<String, Object> ptzPositionOf(String deviceId, String channelCode) {
+        DahuaSdk.Session session = requireSession(deviceId);
+        return ptzPosition(session, sdkChannel(session, deviceId, channelCode));
     }
 
     /**

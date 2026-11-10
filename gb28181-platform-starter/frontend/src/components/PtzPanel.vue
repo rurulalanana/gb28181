@@ -729,10 +729,16 @@
               设备结构：启用 + 上限(設置/查看) + 下限(設置/查看)。
               「設置」= 以当前位置为边界（即时动作），「查看」= 读回设备存的坐标。
 
-              两条边的能力不一样，界面上必须区分开：
-                上限  平台可直接设置（读 tilt → 写 PtzLimit.UpLimit.Boundary，实测生效）
-                下限  设备固件的 PtzLimit 里<b>没有</b> DownLimit 字段，
-                      写不进去，所以按钮禁用并说明原因，不让用户点了等报错
+              两条边都能设。PtzLimit 实测返回 keys=6：
+                UpLimit.Boundary / UpLimit.Enable
+                DownLimit.Boundary / DownLimit.Enable
+                Enable / HorizontalLimitEnable
+              早期误判「固件只有 UpLimit」，原因是当时整项写入的 payload 形状不对
+              （多包了一层 params.table），设备返回 true 却把值丢掉了，
+              看起来就像字段不存在。用 /ptz/raw?name=PtzLimit 读原文就能看穿。
+
+              左右限位（HorizontalLimitEnable）没有独立的 Boundary 字段，
+              设备只给一个总开关，所以这里只做开关、不做「设左右边界」按钮。
             -->
             <template v-else-if="extTab === 'limit'">
               <div class="cam-row">
@@ -757,13 +763,11 @@
               <div class="cam-row">
                 <label class="cam-label">下限</label>
                 <div class="cam-control">
-                  <el-button size="small" disabled
-                             title="这台设备的固件只在 PtzLimit 里提供了 UpLimit，没有 DownLimit 字段，平台无法写入下限。若设备自己的 Web 界面可设置，请在那里设置一次">
-                    设置
-                  </el-button>
+                  <el-button size="small" :disabled="noDevice"
+                             @click="ptzAct('limit-down', {}, '下限已设为当前位置')">设置</el-button>
                   <el-button size="small" :loading="ptzExt.loading" :disabled="noDevice"
                              @click="viewLimit">查看</el-button>
-                  <span class="ext-badge" title="该型号 PtzLimit 未暴露 DownLimit 字段，设备不回读下限坐标">
+                  <span class="ext-badge" title="云台向下转动的最低位置；设置后需打开上面的「启用」才生效">
                     {{ limitForm.downBoundary }}
                   </span>
                 </div>
@@ -2601,10 +2605,19 @@ async function clearAllScans() {
  *
  * <p>设备是读一次当前存的边界坐标再显示。这里直接重读整份云台配置 ——
  * 因为限位坐标在 {@code PtzLimit} 里，和开关是同一个配置项，一次读全。
+ *
+ * <p><b>为什么要把「未设置」讲清楚</b>：设备对从没设过的边界返回 {@code 0}，
+ * 而 0 恰好也是一个合法的角度值（水平正中）。早期直接把原始值弹出来，
+ * 用户看到「上限 0 / 下限 0」会以为「点查看没反应」——
+ * 实际是「确实还没设过，读回来就是 0」。这里显式区分两种状态。
  */
 async function viewLimit() {
   await loadPtzExt()
-  ElMessage.success(`上限 ${limitForm.upBoundary} / 下限 ${limitForm.downBoundary}`)
+  const up = limitForm.upBoundary
+  const down = limitForm.downBoundary
+  // 0 = 设备出厂值，等价于「没设过」（真实设置过会是非 0 的绝对角度）
+  const describe = (v) => (!v || v === '0' || v === '未设置') ? '未设置' : v
+  ElMessage.success(`当前限位：上限 ${describe(up)} / 下限 ${describe(down)}`)
 }
 
 /** 清空全部定时任务（对应设备「已排定工作」页工具栏的「清 空」）。 */
