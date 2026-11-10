@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -54,15 +55,26 @@ public final class OnnxVisionDetector implements VisionDetector {
     private final String inputName;
 
     /**
-     * 当前线程上一次 {@link #preprocess} 的 letterbox 参数
-     * {@code [ratio, origW, origH]}（缩放比 + <b>原图</b>宽高）。
+     * 当前线程上一次 {@link #preprocess} 的几何参数
+     * {@code [ratioX, ratioY, origW, origH]}（<b>两个方向分别的</b>缩放比 + 原图宽高）。
+     *
+     * <h3>为什么必须拆成 ratioX / ratioY（这个 bug 真实存在过）</h3>
+     * 早先只存一个 {@code ratio}，letterbox 路径下是对的（等比缩放），
+     * 但<b>非 letterbox 的拉伸路径</b>（{@code Preprocess.yolo()} / {@code yunet()}）
+     * 把 1280×720 拉成 640×640 时，水平缩了 2 倍、垂直缩了 1.125 倍，
+     * 两个方向不一样。用一个 ratio=1 去还原，算出来的是
+     * {@code x_norm * size / origW = 0.5}，框会整体缩小一半并挤到左上角。
+     *
+     * <p>YOLOv8 走的就是拉伸路径，所以这个隐患一直存在 —— 只是线上两个
+     * 模型（yolox-nano / yolox-tiny）都用 letterbox，没被触发。
+     * 接 YuNet 时才发现：人脸框位置全错。
      *
      * <p>用 {@link ThreadLocal} 而不是实例字段：同一个检测器实例会被流水线的
      * 多个工作线程并发调用，实例字段会串（A 线程的缩放比被 B 线程覆盖，
      * 框位置随之漂移）。
      */
-    private final ThreadLocal<float[]> letterbox =
-            ThreadLocal.withInitial(() -> new float[]{1f, 0f, 0f});
+    private final ThreadLocal<float[]> geometry =
+            ThreadLocal.withInitial(() -> new float[]{1f, 1f, 0f, 0f});
 
     /**
      * @param config 检测器配置（模型路径、阈值、输入尺寸、标签表）
@@ -142,25 +154,35 @@ public final class OnnxVisionDetector implements VisionDetector {
      * 而 YOLOv8 是 {@code /255} + RGB。用错口径的症状是「框位置看着还行、
      * 但分数全挤在 0.31~0.34」—— 模型在乱猜，却不会报任何错。
      *
-     * <p>letterbox 的缩放比记录在 {@link #letterbox}（ThreadLocal），
+     * <p>几何参数（两个方向的缩放比 + 原图宽高）记录在 {@link #geometry}（ThreadLocal），
      * 由 {@link #addCandidate} 用来把框还原到原图。
      */
     private float[] preprocess(BufferedImage image) {
         DetectorConfig.Preprocess spec = config.preprocessSpec();
         int size = config.inputSize();
 
-        float ratio = 1f;
-        int drawW = size;
-        int drawH = size;
         int origW = Math.max(1, image.getWidth());
         int origH = Math.max(1, image.getHeight());
+        int drawW;
+        int drawH;
+        float ratioX;
+        float ratioY;
         if (spec.letterbox()) {
-            ratio = Math.min((float) size / origW, (float) size / origH);
+            // 等比缩放，两方向同一个比：取较小的那个，保证整张图都进得去
+            float ratio = Math.min((float) size / origW, (float) size / origH);
             drawW = Math.max(1, Math.round(origW * ratio));
             drawH = Math.max(1, Math.round(origH * ratio));
+            ratioX = ratio;
+            ratioY = ratio;
+        } else {
+            // 直接拉伸：两方向各自缩放，比例不同（这正是长宽比会被改变的原因）
+            drawW = size;
+            drawH = size;
+            ratioX = (float) size / origW;
+            ratioY = (float) size / origH;
         }
-        // 记录【缩放比 + 原图宽高】，供 addCandidate 把框还原到原图
-        letterbox.set(new float[]{ratio, origW, origH});
+        // 记录【两个方向的缩放比 + 原图宽高】，供 addCandidate 把框还原到原图
+        geometry.set(new float[]{ratioX, ratioY, origW, origH});
 
         BufferedImage canvas = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
         Graphics2D g = canvas.createGraphics();
@@ -199,6 +221,14 @@ public final class OnnxVisionDetector implements VisionDetector {
         try (OnnxTensor tensor = OnnxTensor.createTensor(env,
                 FloatBuffer.wrap(input), new long[]{1, 3, size, size});
              OrtSession.Result result = session.run(Map.of(inputName, tensor))) {
+            /*
+             * YuNet 有 12 个输出，必须按名字取；其它模型只有 1 个，走 get(0)。
+             * 不能统一按名字取：YOLOX 导出的输出名是 "output"，但用户的模型
+             * 可能叫别的名字，按索引取才是兼容的。
+             */
+            if (config.outputFormat() == DetectorConfig.OutputFormat.YUNET) {
+                return parseYunet(result);
+            }
             Object value = result.get(0).getValue();
             if (!(value instanceof float[][][] output)) {
                 log.warn("ONNX 输出类型不是 float[][][]: {}", value == null ? "null" : value.getClass());
@@ -209,6 +239,90 @@ public final class OnnxVisionDetector implements VisionDetector {
             throw new VisionException("ONNX 推理失败: model=" + config.modelId()
                     + " err=" + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 解析 YuNet 的 12 个输出。
+     *
+     * <h3>输出怎么组合（每个尺度 4 个张量）</h3>
+     * <pre>
+     *   cls_s   [1, N, 1]   分类分数（已是概率）
+     *   obj_s   [1, N, 1]   目标性分数（已是概率）
+     *   bbox_s  [1, N, 4]   框回归量（<b>未解码</b>）
+     *   kps_s   [1, N, 10]  5 个关键点（本平台不用）
+     *   score = sqrt(cls × obj)                    ← 几何平均，不是相乘
+     *   cx = (raw_x + grid_x) * stride
+     *   cy = (raw_y + grid_y) * stride
+     *   w  = exp(raw_w) * stride
+     *   h  = exp(raw_h) * stride
+     * </pre>
+     *
+     * <h3>三个必须注意的点（都是实测踩出来的）</h3>
+     * <ol>
+     *   <li><b>按名字取，不按索引</b>：ONNX 不保证输出顺序稳定。实测导出的顺序是
+     *       {@code cls_8, cls_16, cls_32, obj_8, ...}（同类聚在一起），
+     *       而不是「一个尺度的四个张量挨着」。按索引取会把 obj 当 cls。</li>
+     *   <li><b>不要再 sigmoid</b>：cls/obj 导出时已经是概率。加 sigmoid 后
+     *       最高分从 0.892 掉到 0.710 —— 分数整体被压平，阈值 0.45 下会漏检。</li>
+     *   <li><b>网格顺序 row-major</b>：{@code gy} 外层、{@code gx} 内层，
+     *       与训练时的 {@code meshgrid} 展开一致。反了的话框会沿对角线错位。</li>
+     * </ol>
+     */
+    private List<Detection> parseYunet(OrtSession.Result result) throws OrtException {
+        int size = config.inputSize();
+        int[] strides = {8, 16, 32};
+        Map<String, float[][]> tensors = new HashMap<>();
+        for (Map.Entry<String, ai.onnxruntime.OnnxValue> e : result) {
+            Object v = e.getValue().getValue();
+            if (v instanceof float[][][] arr && arr.length > 0) {
+                tensors.put(e.getKey(), arr[0]);
+            }
+        }
+        if (tensors.isEmpty()) {
+            log.warn("YuNet 输出为空或类型不符: model={}", config.modelId());
+            return List.of();
+        }
+
+        List<Detection> candidates = new ArrayList<>();
+        for (int stride : strides) {
+            float[][] cls = tensors.get("cls_" + stride);
+            float[][] obj = tensors.get("obj_" + stride);
+            float[][] bbox = tensors.get("bbox_" + stride);
+            if (cls == null || obj == null || bbox == null) {
+                log.warn("YuNet 缺少尺度 {} 的输出: model={}", stride, config.modelId());
+                continue;
+            }
+            int side = size / stride;
+            int expected = side * side;
+            if (cls.length < expected || bbox.length < expected) {
+                log.warn("YuNet 尺度 {} 候选数不足: 期望 {} 实际 cls={} bbox={}",
+                        stride, expected, cls.length, bbox.length);
+                continue;
+            }
+            for (int gy = 0; gy < side; gy++) {
+                for (int gx = 0; gx < side; gx++) {
+                    int i = gy * side + gx;
+                    // cls/obj 已是概率，直接几何平均
+                    float score = (float) Math.sqrt(
+                            Math.max(0f, cls[i][0]) * Math.max(0f, obj[i][0]));
+                    if (score < config.confidenceThreshold()) {
+                        continue;
+                    }
+                    float[] r = bbox[i];
+                    float cx = (r[0] + gx) * stride;
+                    float cy = (r[1] + gy) * stride;
+                    float w = (float) (Math.exp(r[2]) * stride);
+                    float h = (float) (Math.exp(r[3]) * stride);
+                    /*
+                     * YuNet 只有「人脸」一个类别（类别 id 固定 0）。
+                     * 直接传 0 给 addCandidate，它会按 config.labels() 取标签，
+                     * 而人脸模型的 labels 配成 ["face"]。
+                     */
+                    addCandidate(candidates, 0, score, cx, cy, w, h, false);
+                }
+            }
+        }
+        return nms(candidates, 0.3f);
     }
 
     /**
@@ -230,6 +344,11 @@ public final class OnnxVisionDetector implements VisionDetector {
             case YOLO_CHANNEL_FIRST -> parseChannelFirst(a);
             case YOLO_ANCHOR_FIRST -> parseAnchorFirst(a, false, false, false);
             case YOLOX -> parseYolox(a);
+            // 不该走到这里：YUNET 在 run() 里已按多输出提前分派
+            case YUNET -> {
+                log.warn("YUNET 格式走了单输出解析分支，这是实现错误: model={}", config.modelId());
+                yield List.of();
+            }
         };
     }
 
@@ -412,6 +531,10 @@ public final class OnnxVisionDetector implements VisionDetector {
      * <p>漏掉第 2 步的后果：框会整体缩小并偏向左上角 —— 16:9 画面在 416 方形里
      * 只占上 234 像素高，不还原的话检测框的高度只有实际的一半左右。
      *
+     * <p><b>第 2 步必须用两个方向的缩放比</b>（{@code ratioX} / {@code ratioY}）：
+     * letterbox 是等比缩放，两个比相同；而拉伸路径（YOLOv8 / YuNet）两个比不同，
+     * 用一个统一的值会让框在水平或垂直方向错位。
+     *
      * @param normalized {@code true} 表示入参已是 0~1（YOLOv8），{@code false} 表示是像素（YOLOX）
      */
     private void addCandidate(List<Detection> out, int classId, float score,
@@ -421,10 +544,11 @@ public final class OnnxVisionDetector implements VisionDetector {
             return;
         }
         int size = Math.max(1, config.inputSize());
-        float[] lb = letterbox.get();
-        float ratio = lb[0] > 0 ? lb[0] : 1f;
-        float origW = lb[1] > 0 ? lb[1] : size;
-        float origH = lb[2] > 0 ? lb[2] : size;
+        float[] geo = geometry.get();
+        float ratioX = geo[0] > 0 ? geo[0] : 1f;
+        float ratioY = geo[1] > 0 ? geo[1] : 1f;
+        float origW = geo[2] > 0 ? geo[2] : size;
+        float origH = geo[3] > 0 ? geo[3] : size;
 
         // ① 统一到「模型输入尺度的像素」
         float scale = normalized ? size : 1f;
@@ -432,11 +556,11 @@ public final class OnnxVisionDetector implements VisionDetector {
         cy *= scale;
         w *= scale;
         h *= scale;
-        // ② 去 letterbox → 原图像素
-        cx /= ratio;
-        cy /= ratio;
-        w /= ratio;
-        h /= ratio;
+        // ② 去缩放 → 原图像素（两方向各用自己的比）
+        cx /= ratioX;
+        cy /= ratioY;
+        w /= ratioX;
+        h /= ratioY;
         // ③ 归一化到原图
         float x = clamp01((cx - w / 2f) / origW);
         float y = clamp01((cy - h / 2f) / origH);

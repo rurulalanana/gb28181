@@ -89,16 +89,9 @@ public class VisionService {
             log.warn("视觉识别已启用但没有可用模型，跳过自动开启");
             return;
         }
-        /*
-         * 先把 yml 的通道清单导入库（表为空时才导）。
-         *
-         * 放在这里而不是构造器里：构造器阶段数据库可能还没就绪，
-         * 而 ApplicationReadyEvent 时 schema.sql 一定已执行完。
-         */
-        seedFromPropertiesIfEmpty();
         List<String> channels = configuredChannels();
         if (channels.isEmpty()) {
-            log.info("视觉识别已启用但没有配置任何通道，等待在「AI 检测」页面勾选");
+            log.info("视觉识别已启用但还没有配置任何通道，请在「AI 检测」页面添加");
             return;
         }
         // 先试一轮，失败的下一次 tick 再试（设备可能还没注册上来）
@@ -108,33 +101,28 @@ public class VisionService {
     /**
      * 要跑检测的通道清单。
      *
-     * <h3>为什么以库为准，yml 只当种子</h3>
-     * 用户在界面上勾选通道后，选择落在 {@code gb_vision_channel}。
-     * 如果这里继续读 {@code props.getChannels()}，重启就会把界面的改动
-     * <b>整体覆盖</b>回 yml 里的值 —— 表现为「配了但重启就没了」，
-     * 而日志上完全看不出问题。
+     * <h3>唯一来源是数据库</h3>
+     * 通道配置<b>完全在平台界面维护</b>（{@code gb_vision_channel}），
+     * 配置文件里不再有 {@code vision.channels}。
      *
-     * <p>所以：<b>表里有行就完全以表为准</b>（哪怕只有一行）；表为空时才用
-     * yml 的 {@code vision.channels} 作为初始种子。这样全新部署仍然
-     * 「配了 yml 就能跑」，而一旦运维在界面上动过，就以界面为准。
-     *
-     * <p>不做「yml ∪ 表」的并集：那样界面上<b>取消</b>一个 yml 里的通道
-     * 永远取消不掉 —— 每次重启它又回来了。这比「少一个通道」更难排查。
+     * <p>这是刻意的：曾经有过「yml 当种子、表为空时导入」的兼容逻辑，
+     * 结果留下一个反复出问题的边界 —— 运维在界面上删掉通道，重启后
+     * 因为表刚好空过又种回来；或者 yml 里写了一份、界面上是另一份，
+     * 排查时根本不知道哪份在生效。现在只有一个来源，没有歧义。
      */
     private List<String> configuredChannels() {
         List<GbVisionChannel> rows = visionChannelMapper.selectList(null);
-        if (rows != null && !rows.isEmpty()) {
-            List<String> out = new ArrayList<>(rows.size());
-            for (GbVisionChannel row : rows) {
-                String key = row.channelKey();
-                if (key != null && !key.isBlank()) {
-                    out.add(key);
-                }
-            }
-            return out;
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
         }
-        List<String> seed = props.getChannels();
-        return seed == null ? List.of() : seed;
+        List<String> out = new ArrayList<>(rows.size());
+        for (GbVisionChannel row : rows) {
+            String key = row.channelKey();
+            if (key != null && !key.isBlank()) {
+                out.add(key);
+            }
+        }
+        return out;
     }
 
     /** 当前生效的通道清单（给接口用，与 {@link #configuredChannels()} 同源）。 */
@@ -244,9 +232,18 @@ public class VisionService {
             log.debug("通道已在检测中，忽略重复开启: {}", channelKey);
             return true;
         }
-        VisionDetector detector = registry.detector(props.getDefaultModel());
+        /*
+         * 用这一路绑定的场景，而不是全局默认模型。
+         *
+         * 一个通道可以只跑人形、另一个跑车辆：场景 id 存在
+         * gb_vision_channel.scenario_id 里，由界面选择。
+         * 没绑定（老数据 / 直接调 start 接口）时退回默认场景。
+         */
+        VisionProperties.Scenario scenario = scenarioOf(channelKey);
+        String modelId = scenario == null ? props.getDefaultModel() : scenario.modelId();
+        VisionDetector detector = registry.detector(modelId);
         if (detector == null) {
-            log.warn("没有可用视觉模型，无法开启检测: {}", channelKey);
+            log.warn("没有可用视觉模型，无法开启检测: channel={} model={}", channelKey, modelId);
             return false;
         }
         String[] ids = splitKey(channelKey);
@@ -264,15 +261,60 @@ public class VisionService {
          */
         String tsUrl = ZlmFrameSource.toTsUrl(flvUrl);
 
-        VisionPipeline pipeline = new VisionPipeline(detector, pipelineConfig(), sink,
-                new Roi(List.of()));
+        /*
+         * 流水线的标签过滤按「场景」来，不是全局。
+         *
+         * 这样同一份 COCO 权重能当两种能力用：
+         * 场景「人形」配 [person]、场景「车辆」配 [car,truck,bus,motorcycle]。
+         * 传空列表表示场景没限制标签（全目标检测）。
+         */
+        List<String> scenarioLabels = scenario == null
+                ? List.of() : registry.scenarioLabels(scenario.id());
+        VisionPipeline pipeline = new VisionPipeline(detector,
+                pipelineConfig(scenarioLabels), sink, new Roi(List.of()));
         ZlmFrameSource source = new ZlmFrameSource(channelKey, tsUrl, props.getFps());
         AutoCloseable detach = pipeline.attach(source);
-        running.put(channelKey, new Running(pipeline, detach, props.getDefaultModel()));
+        running.put(channelKey, new Running(pipeline, detach, modelId));
         startedAt.put(channelKey, System.currentTimeMillis());
         stallWarned.remove(channelKey);
-        log.info("视觉检测已开启: channel={} model={} url={}", channelKey, props.getDefaultModel(), tsUrl);
+        log.info("视觉检测已开启: channel={} model={} scenario={} labels={} url={}",
+                channelKey, modelId,
+                scenario == null ? "-" : scenario.id(),
+                scenarioLabels.isEmpty() ? "全部" : scenarioLabels,
+                tsUrl);
         return true;
+    }
+
+    /**
+     * 某通道绑定的场景；没绑定或场景已不存在时返回 {@code null}。
+     *
+     * <p>每次 start 都查库而不是缓存：通道数量是个位数，
+     * 而缓存会引入「界面上改了场景但运行的还是旧的」这类问题 ——
+     * 改完必须重启才生效，运维很难意识到。
+     */
+    private VisionProperties.Scenario scenarioOf(String channelKey) {
+        try {
+            com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
+                    new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
+            String[] ids = splitKey(channelKey);
+            q.eq("channel_id", ids[1]);
+            List<GbVisionChannel> rows = visionChannelMapper.selectList(q);
+            if (rows == null || rows.isEmpty()) {
+                return null;
+            }
+            String scenarioId = rows.get(0).getScenarioId();
+            if (scenarioId == null || scenarioId.isBlank()) {
+                return null;
+            }
+            VisionProperties.Scenario s = registry.scenario(scenarioId);
+            if (s == null) {
+                log.warn("通道绑定的场景不存在，退回默认: channel={} scenario={}", channelKey, scenarioId);
+            }
+            return s;
+        } catch (RuntimeException e) {
+            log.debug("读取通道场景失败，退回默认: {} {}", channelKey, e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -366,6 +408,14 @@ public class VisionService {
             item.put("deviceId", row.getDeviceId());
             item.put("channelId", row.getChannelId());
             item.put("channel", key);
+            item.put("scenarioId", row.getScenarioId());
+            /*
+             * 把场景的展示名一起返回：界面上显示「人形检测」而不是
+             * 「person-coco」这种 id，运维才看得懂自己在配什么。
+             */
+            VisionProperties.Scenario sc = registry.scenario(row.getScenarioId());
+            item.put("scenarioName", sc == null ? null : sc.name());
+            item.put("scenarioCategory", sc == null ? null : sc.category());
             item.put("remark", row.getRemark());
             item.put("createTime", row.getCreateTime() == null ? null
                     : row.getCreateTime().toString());
@@ -400,14 +450,17 @@ public class VisionService {
      * 设备可能只是暂时离线，{@code retryPending()} 会在 30 秒内自动补上。
      * 如果这里因为「设备不在线」拒绝保存，运维就得等设备上线再来配一次。
      *
+     * @param scenarioId 这一路跑哪个场景；为空时用默认场景
      * @return 是否为新插入（{@code false} 表示已存在）
      */
-    public boolean addChannel(String deviceId, String channelId, String remark) {
+    public boolean addChannel(String deviceId, String channelId, String scenarioId, String remark) {
         if (channelId == null || channelId.isBlank()) {
             throw new IllegalArgumentException("通道编码不能为空");
         }
         String cid = channelId.trim();
         String did = deviceId == null || deviceId.isBlank() ? null : deviceId.trim();
+        String sid = scenarioId == null || scenarioId.isBlank()
+                ? registry.defaultScenarioId() : scenarioId.trim();
 
         com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
                 new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
@@ -418,6 +471,7 @@ public class VisionService {
             GbVisionChannel row = new GbVisionChannel();
             row.setDeviceId(did);
             row.setChannelId(cid);
+            row.setScenarioId(sid);
             row.setRemark(remark);
             visionChannelMapper.insert(row);
         }
@@ -427,6 +481,42 @@ public class VisionService {
             start(key);
         }
         return inserted;
+    }
+
+    /**
+     * 修改某通道的场景。
+     *
+     * <p>先停再启：场景决定用哪个模型和哪套标签过滤，而这两者都是在
+     * {@code start()} 里装配进流水线的，改配置不会自动生效。
+     * 不重启的话，界面上显示已改成「车辆检测」，实际还在跑人形 ——
+     * 这种「显示和实际不一致」最难排查，所以宁可断开重连一次。
+     *
+     * @return 是否确实改了（通道不存在返回 false）
+     */
+    public boolean updateChannelScenario(String channelId, String scenarioId) {
+        if (channelId == null || channelId.isBlank()) {
+            return false;
+        }
+        String cid = channelId.trim();
+        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
+                new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
+        q.eq("channel_id", cid);
+        List<GbVisionChannel> rows = visionChannelMapper.selectList(q);
+        if (rows == null || rows.isEmpty()) {
+            return false;
+        }
+        GbVisionChannel row = rows.get(0);
+        row.setScenarioId(scenarioId);
+        visionChannelMapper.updateById(row);
+
+        // 停掉再起，让新场景生效
+        for (String key : new ArrayList<>(running.keySet())) {
+            if (key.equals(cid) || key.endsWith("/" + cid)) {
+                stop(key);
+                start(key);
+            }
+        }
+        return true;
     }
 
     /**
@@ -468,48 +558,6 @@ public class VisionService {
     }
 
     /**
-     * 把 yml 的 {@code vision.channels} 导入库（只在表为空时执行）。
-     *
-     * <p>这样全新部署仍然「配了 yml 就能跑」，而之后界面的改动不会被重启覆盖。
-     * 已经有行时完全不动 —— 否则运维在界面上删掉的通道会被种回来。
-     *
-     * @return 导入的条数（0 表示表非空，未导入）
-     */
-    public int seedFromPropertiesIfEmpty() {
-        Long count = visionChannelMapper.selectCount(null);
-        if (count != null && count > 0) {
-            return 0;
-        }
-        List<String> seed = props.getChannels();
-        if (seed == null || seed.isEmpty()) {
-            return 0;
-        }
-        int imported = 0;
-        for (String raw : seed) {
-            if (raw == null || raw.isBlank()) {
-                continue;
-            }
-            String[] ids = splitKey(raw.trim());
-            GbVisionChannel row = new GbVisionChannel();
-            row.setDeviceId(ids[0]);
-            row.setChannelId(ids[1]);
-            row.setRemark("由 vision.channels 初始化导入");
-            try {
-                visionChannelMapper.insert(row);
-                imported++;
-            } catch (RuntimeException e) {
-                // 唯一键冲突（重复配置）不该让启动失败
-                log.debug("导入视觉通道跳过: {} {}", raw, e.getMessage());
-            }
-        }
-        if (imported > 0) {
-            log.info("视觉识别：已把 vision.channels 的 {} 路导入 gb_vision_channel（之后以库为准）",
-                    imported);
-        }
-        return imported;
-    }
-
-    /**
      * 正在检测的<b>通道编码</b>集合（不带设备编码）。
      *
      * <p>给 {@code StreamService.reapIdleStreams} 用：视觉检测是靠 ffmpeg 拉 TS 流工作的，
@@ -540,11 +588,22 @@ public class VisionService {
 
     // ==================== 内部 ====================
 
-    private PipelineConfig pipelineConfig() {
+    /**
+     * 流水线配置。
+     *
+     * @param scenarioLabels 场景的标签过滤（空 = 全部）。
+     *                       由<b>场景</b>决定而不是全局配置：同一份 COCO 权重，
+     *                       配 {@code [person]} 就是人形检测，配
+     *                       {@code [car,truck,bus]} 就是车辆检测。
+     *                       全局 {@code vision.labels} 已经移除 ——
+     *                       多模型场景下「一个全局标签表」会把所有通道
+     *                       锁成同一种能力，那样加模型就没意义了。
+     */
+    private PipelineConfig pipelineConfig(List<String> scenarioLabels) {
         return new PipelineConfig(props.getFps(), props.getQueueCapacity(),
                 props.getWorkerThreads(), props.getConfidenceThreshold(),
                 props.getMinEventFrames(), props.getMinEventMillis(),
-                props.getLabels());
+                scenarioLabels == null ? List.of() : scenarioLabels);
     }
 
     /** 拆 {@code 设备编码/通道编码}；只有一段时两段相同（设备直连）。 */

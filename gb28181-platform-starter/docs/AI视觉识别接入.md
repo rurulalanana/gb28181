@@ -28,26 +28,55 @@ gb28181-platform-starter/.../vision/
 
 ## 2. 开启方式
 
-### 2.1 配置
+### 2.1 配置文件只配「有什么」，不配「用在哪」
 
-`application.yml` 的 `vision` 段（默认关闭）：
+> ⚠️ **`vision.channels` 已删除**。哪些通道要检测，**全部在平台界面配**
+> （运维 → AI 检测）。配置文件里写通道这件事已经彻底去掉。
 
 ```yaml
 vision:
   enabled: true                    # ← 打开
   model-dir: models                # 模型目录（相对进程工作目录）
+
+  # 有哪些模型（文件 + 输出格式 + 预处理口径）
   models:
     - id: yolox-nano
+      display-name: 通用检测（nano，最快）
       file: yolox_nano.onnx
       format: YOLOX                # 必须与 preprocess 配对
       input-size: 416
       preprocess: yolox
       labels: []                   # 空 = 内置 COCO 80 类
+      category: general
+      estimated-ms-per-frame: 75
+    - id: yunet-face
+      display-name: 人脸检测（YuNet）
+      file: face_detection_yunet.onnx
+      format: YUNET
+      input-size: 640
+      preprocess: yunet
+      labels: [face]
+      category: face
+      estimated-ms-per-frame: 25
+
   default-model: yolox-nano
-  channels:                        # 要检测的通道（设备编码/通道编码）
-    - "10001/10001-1"
-    - "10001/10001-2"
-  fps: 1.0
+
+  # 有哪些检测能力（场景 = 模型 + 标签过滤）
+  scenarios:
+    - id: person
+      model-id: yolox-nano
+      name: 人形检测
+      category: person
+      labels: [person]
+      description: 只检出人，过滤掉车辆/家具等。
+    - id: face
+      model-id: yunet-face
+      name: 人脸检测
+      category: face
+      labels: [face]
+      description: 只框出人脸（不是整个人）。
+
+  fps: 4.0
   confidence-threshold: 0.45
   min-event-frames: 3
   min-event-millis: 2000
@@ -56,6 +85,39 @@ vision:
   save-snapshot: true
 ```
 
+### 2.1.1 为什么通道配置必须从配置文件里拿掉
+
+历史上 `vision.channels` 当过「初始种子」（表为空时导入），留下两个反复出问题的边界：
+
+1. **运维在界面删掉通道，重启后可能又被种回来** —— 只要表恰好空过一次
+2. **yml 一份、界面另一份，排查时不知道哪份在生效**
+
+单一来源才能没有歧义。配置文件现在只回答「平台支持哪些能力」，
+「哪路通道用哪种能力」只存在于数据库 `gb_vision_channel` 表。
+
+### 2.1.2 模型 vs 场景：为什么要有两层
+
+用户要的是「人形检测 / 车辆检测 / 人脸检测」这些**能力**，不是「yolox-nano」这种**文件名**。
+
+- **模型（model）**：一份 .onnx 权重 + 输出格式 + 预处理口径
+- **场景（scenario）**：模型 + 标签过滤，是界面上「检测能力」下拉里的一个选项
+
+同一份 COCO 权重换个标签过滤就是另一种能力，**不需要多份模型文件**：
+
+| 场景 | 模型 | 标签过滤 | 效果 |
+|---|---|---|---|
+| `person` | yolox-nano | `[person]` | 人形检测 |
+| `person-accurate` | yolox-tiny | `[person]` | 人形检测（小目标更准，慢一倍） |
+| `vehicle` | yolox-nano | `[car,truck,bus,motorcycle,bicycle]` | 车辆检测 |
+| `general` | yolox-nano | `[]`（不过滤） | 全目标检测 |
+| `face` | yunet-face | `[face]` | **人脸**检测（必须专用模型） |
+
+> **`face` 为什么不能用 COCO 模型**：COCO 80 类里**没有「人脸」这个类别**，
+> `person` 检出的是整个人体框。数人头、判断是否正面朝向镜头都做不到，
+> 所以必须引入 YuNet 这类人脸专用模型。
+
+场景不配时自动派生：每个模型生成一个「全目标检测」场景，保证界面永远有选项。
+
 ### 2.2 部署模型文件
 
 模型**不打进 jar**（体积 + 许可），放在 jar 旁边：
@@ -63,16 +125,66 @@ vision:
 ```bash
 # 服务器上
 cd /opt/gb28181
-ls models/yolox_nano.onnx       # 必须存在，否则日志报「模型文件不存在」
+ls -la models/
+#   yolox_nano.onnx            3.5 MB   通用检测
+#   yolox_tiny.onnx             20 MB   通用检测（更准）
+#   face_detection_yunet.onnx  232 KB   人脸检测
 ```
 
-仓库里的 `models/` 目录随 git 分发（3.5 MB，适合入库）。
-部署时 `scp -r models root@host:/opt/gb28181/`。
-
-### 2.3 手动开关某一路
+仓库里的 `models/` 随 git 分发（LFS 管理）。部署时：
 
 ```bash
-# 开启
+scp -P 10103 models/*.onnx root@host:/opt/gb28181/models/
+```
+
+> **模型按需懒加载**：配了 `yolox-tiny` 的场景但没人选，那个模型就不会被加载。
+> 日志里出现 `视觉模型已加载: id=xxx` 才算真的加载了。
+
+### 2.3 配哪些通道检测（在界面上，不在配置文件）
+
+**运维 → AI 检测**：
+
+1. 点「添加通道」→ 可搜索多选表格里勾通道 → 选「检测能力」→ 确定
+2. 主表每行的「检测能力」列可以直接下拉切换（后端会重启这一路）
+3. 「移除」把通道从配置里删掉
+
+命令行等价操作：
+
+```bash
+T="<token>"
+# 添加（幂等）
+curl -H "Authorization: $T" -X POST \
+  "http://host:48092/api/v1/vision/channels/add?device_id=10001&channel_id=10001-1&scenario_id=person"
+
+# 切换检测能力（会重启这一路）
+curl -H "Authorization: $T" -X POST \
+  "http://host:48092/api/v1/vision/channels/scenario?channel_id=10001-1&scenario_id=face"
+
+# 移除
+curl -H "Authorization: $T" -X POST \
+  "http://host:48092/api/v1/vision/channels/remove?channel_id=10001-1"
+
+# 看配置 + 可用能力清单
+curl -H "Authorization: $T" "http://host:48092/api/v1/vision/channels"
+```
+
+### 2.4 临时看一眼某一路（不写配置）
+
+通道管理 → 播放 / 实时预览 → 弹窗里点「AI 检测」。
+这种是**临时**的，不进 `gb_vision_channel`，刷新即止。
+
+点「关闭」时会问两种意图：
+
+- **暂时停止** —— 保留配置，重启后 / 30 秒后自动恢复
+- **不再检测** —— 从配置里删掉，永久生效
+
+不分成两个选项的话，配置了长期检测的通道会在 30 秒后被 `retryPending` 重新开启，
+用户看到「点了停止又自己开了」。
+
+### 2.5 手动开关 / 看状态
+
+```bash
+# 开启（临时，不写库）
 curl -H "Authorization: <token>" -X POST \
   "http://host:48092/api/v1/vision/start?channel=10001/10001-1"
 
@@ -338,12 +450,83 @@ timeout 17 curl -s --max-time 15 "http://127.0.0.1:48089/rtp/<dev>_<ch>.live.ts"
 
 1. 把 `.onnx` 放进 `models/`
 2. 在 `models/MODELS.md` 加元数据（人工维护的权威说明）
-3. 在 `application.yml` 的 `vision.models` 加同样一条
-4. 重启，看日志「视觉模型已加载: id=xxx」
+3. 在 `application-vision.yml` 的 `vision.models` 加同样一条
+4. 如果它要成为一种**新能力**，在 `vision.scenarios` 加一条引用它
+5. 重启，看日志「视觉模型已加载: id=xxx」+「视觉场景: N 个（[...]）」
 
-**不需要改代码、不需要重新编译**。
+**不需要改代码、不需要重新编译** —— 除非模型有全新的输出结构（见 6.1）。
 
-选模型时必须确认许可：YOLOX 是 Apache-2.0 可商用；部分 YOLO 权重是 AGPL，商用要买授权。
+### 6.1 YuNet 接入实录：三个会让它「静默零检出」的坑
+
+YuNet 人脸检测与 YOLO 系有三处结构性差异，每一处都不会报错，
+只会表现成「开了但永远零检出」或「框位置全错」：
+
+#### 坑 1：12 个输出，不是 1 个
+
+```
+cls_8 [1,6400,1]   cls_16 [1,1600,1]   cls_32 [1,400,1]
+obj_8 [1,6400,1]   obj_16 [1,1600,1]   obj_32 [1,400,1]
+bbox_8[1,6400,4]   bbox_16[1,1600,4]   bbox_32[1,400,4]
+kps_8 [1,6400,10]  kps_16 [1,1600,10]  kps_32 [1,400,10]
+```
+
+原来的 `run()` 是 `result.get(0)` —— 只会拿到 `cls_8`（形状 `[1,6400,1]`），
+当检测结果解析时「每行只有 1 个字段」，`classCount = 1 - 5 = -4`，
+`if (classCount <= 0) return List.of()` **静默返回空列表**。
+
+修法：`OutputFormat.YUNET` 走单独分支，**按输出名**取全部 12 个张量。
+不能按索引 —— ONNX 不保证输出顺序稳定，实测顺序是
+`cls_8, cls_16, cls_32, obj_8, ...`（同类聚在一起），
+按索引取会把 obj 当 cls。
+
+#### 坑 2：拉伸路径的坐标还原是错的（这个 bug 一直潜伏着）
+
+`addCandidate` 原来只存一个 `ratio`。letterbox 路径下两个方向同比，没问题；
+但**非 letterbox 的拉伸路径**（`Preprocess.yolo()` / `yunet()`）把
+1280×720 拉成 640×640 时，水平缩 2 倍、垂直缩 1.125 倍 —— 两个比不同。
+用一个 `ratio=1` 去还原，框会**整体缩小到一半并挤向左上角**。
+
+> YOLOv8 走的就是拉伸路径，所以这个隐患一直存在。只是线上两个模型
+> （yolox-nano / yolox-tiny）都用 letterbox，没被触发。接 YuNet 才暴露。
+
+修法：几何参数改成 `[ratioX, ratioY, origW, origH]`，`addCandidate` 里
+`cx /= ratioX; cy /= ratioY; w /= ratioX; h /= ratioY`。
+
+#### 坑 3：不要加 sigmoid
+
+YuNet 导出的 `cls` / `obj` **已经是概率**。分数是 `sqrt(cls × obj)` 几何平均。
+
+实测同一张 416×234 监控截图、同一套解码，只改预处理：
+
+| 口径 | 最高分 | 检出数 |
+|---|---|---|
+| **BGR + 0~255 + 拉伸（正确）** | **0.892** | 3 |
+| BGR + 0~255 + 拉伸 + sigmoid | 0.710 | 3 |
+| RGB + 0~255 + 拉伸 | 0.708 | 2 |
+| RGB + sigmoid | 0.670 | 2 |
+
+加 sigmoid 分数被压平，阈值 0.45 下会漏检；通道顺序错会直接少检出一张。
+
+#### 验证方法（别只看日志「已加载」）
+
+日志说「模型已加载」只证明文件能打开，不证明后处理对。要看**真实检出**：
+
+```bash
+curl -H "Authorization: $T" \
+  "http://127.0.0.1:48092/api/v1/vision/detections?channel=10001/10001-1"
+# 期望看到 "counts": {"face": 3}，且 box 的 x/y/w/h 都在 0~1
+```
+
+坐标全挤在左上角（`x≈0, y≈0`）或 `w/h` 极小 → 坑 2；
+分数普遍 < 0.3 → 坑 3（加错 sigmoid）；
+永远空 → 坑 1（没取到多输出）。
+
+### 6.2 模型许可
+
+- YOLOX：Apache-2.0，可商用
+- YuNet（opencv_zoo）：MIT，可商用
+- **YOLOv8（ultralytics）：AGPL-3.0，商用需购买授权** —— 这是没选它的原因之一，
+  另外 ultralytics 官方 assets 里**没有 .onnx**，得自己从 `.pt` 导出
 
 ## 7. 前端叠框
 
@@ -455,16 +638,35 @@ ping 帧，而 nginx / 云负载均衡通常 60 秒无数据就断开。
 
 表 `gb_vision_channel`（一行 = 一个要长期检测的通道，停用就删行）。
 
-`application.yml` 的 `vision.channels` 降级为**初始种子**：
+`gb_vision_channel` 是**唯一来源**（yml 里的 `vision.channels` 已删除）：
 
-- 表为空时才导入一次
-- 之后**一律以库为准**
+| 列 | 含义 |
+|---|---|
+| `device_id` | 设备编码 |
+| `channel_id` | 通道编码 |
+| `scenario_id` | 检测能力（`vision.scenarios[].id`） |
+| `remark` | 备注 |
 
-**为什么不做「yml ∪ 表」的并集**：那样界面上**取消**一个 yml 里的通道
-永远取消不掉 —— 每次重启它又回来了，比「少一个通道」更难排查。
+> **历史**：`vision.channels` 曾经是「表为空时导入一次」的初始种子。
+> 这留下两个反复出问题的边界：运维在界面删掉通道后，只要表恰好空过一次
+> 重启又会种回来；以及 yml 一份、界面另一份，排查时不知道哪份在生效。
+> 现在通道配置**只在库里**。
 
 **为什么没有 `enabled` 列**：多一个布尔列就多一个可能忘记同步的状态，
 而它没有收益 —— 本表只存「要跑的通道」，不需要保留历史。
+停用就是删行。
+
+### 检测能力（scenario）怎么绑定到通道
+
+每行有 `scenario_id`，启动时按它去 `vision.scenarios` 查：
+用哪个模型 + 过滤哪些标签。改这一列 = 改这一路的检测能力。
+
+界面上「检测能力」列是个下拉，改完**后端会重启这一路** ——
+场景决定模型和标签过滤，这两者是在流水线构造时装配进去的，
+不重启不生效。
+
+查不到场景时（配置里删了但库里还引用着）：告警并回退到默认模型，
+不会让这一路起不来。
 
 ### 状态为什么分四种
 

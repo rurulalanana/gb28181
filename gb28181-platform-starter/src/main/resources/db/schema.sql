@@ -248,6 +248,9 @@ CREATE TABLE IF NOT EXISTS gb_vision_channel (
     device_id   VARCHAR(64),
     -- 通道编码，ZLM 流名，也是检测的 channel 键（与前端 detections 的 channel 一致）
     channel_id  VARCHAR(64)  NOT NULL,
+    -- 这一路跑哪个场景（vision.scenarios[].id）。不同通道可以跑不同能力：
+    -- 大门口人形、停车场车辆、仓库烟火。为空时退回 vision.default-model。
+    scenario_id VARCHAR(64),
     -- 备注：为什么开这一路（人工填，便于运维回溯）
     remark      VARCHAR(255),
     create_time TIMESTAMP    DEFAULT NOW(),
@@ -256,6 +259,11 @@ CREATE TABLE IF NOT EXISTS gb_vision_channel (
 );
 CREATE INDEX IF NOT EXISTS idx_gb_vision_channel_device
     ON gb_vision_channel (device_id);
+
+-- 老库升级：补充「场景」列。
+-- CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，缺这列时 MyBatis 查询会直接报
+-- "column scenario_id does not exist"，整个 AI 检测页都打不开。
+ALTER TABLE gb_vision_channel ADD COLUMN IF NOT EXISTS scenario_id VARCHAR(64);
 
 -- -------------------- 设备录像目录（RecordInfo） --------------------
 

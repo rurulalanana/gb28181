@@ -46,8 +46,8 @@ public class VisionConfiguration {
         sink.setCooldownMillis(props.getEventCooldownMillis());
         sink.setEventHandlers(List.of(recorder));
         if (props.isEnabled()) {
-            log.info("视觉识别已启用: models={} channels={} fps={} threshold={}",
-                    props.getModels().size(), props.getChannels().size(),
+            log.info("视觉识别已启用: models={} fps={} threshold={}（通道在平台界面配置）",
+                    props.getModels().size(),
                     props.getFps(), props.getConfidenceThreshold());
         }
     }

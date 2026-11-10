@@ -98,6 +98,20 @@ public class VisionModelRegistry {
                     m.getId(), file.getFileName(), m.getFormat(), m.getInputSize(),
                     m.getPreprocess(), Files.isRegularFile(file) ? sizeKb(file) : 0);
         }
+        /*
+         * 场景的启动期校验：配错了要在这里就暴露，而不是等用户点了「添加通道」才报错。
+         *
+         * 典型错误：场景引用了不存在的模型 id —— 那样通道能加上但永远起不来，
+         * 日志里只有一句「没有可用视觉模型」，很难定位到是场景写错了。
+         */
+        for (VisionProperties.Scenario s : allScenarios()) {
+            if (declaration(s.modelId()) == null) {
+                log.warn("场景引用了未声明的模型: scenario={} model={}（该场景不可用）",
+                        s.id(), s.modelId());
+            }
+        }
+        log.info("视觉场景: {} 个（{}）", allScenarios().size(),
+                allScenarios().stream().map(VisionProperties.Scenario::id).toList());
     }
 
     /** 模型目录（绝对路径）。 */
@@ -117,6 +131,113 @@ public class VisionModelRegistry {
             return id;
         }
         return props.getModels().isEmpty() ? null : props.getModels().get(0).getId();
+    }
+
+    // ==================== 场景 ====================
+
+    /** 用途分类常量（界面上分组用）。 */
+    public static final String CATEGORY_GENERAL = "general";
+    public static final String CATEGORY_PERSON = "person";
+    public static final String CATEGORY_VEHICLE = "vehicle";
+    public static final String CATEGORY_FACE = "face";
+    public static final String CATEGORY_HELMET = "helmet";
+    public static final String CATEGORY_FIRE = "fire";
+
+    /**
+     * 全部可用场景。
+     *
+     * <h3>为什么要有「场景」这一层</h3>
+     * 用户要的是「人形检测 / 车辆检测」这些<b>能力</b>，不是「yolox-nano」
+     * 这种文件名。而同一份 COCO 权重换个标签过滤就是另一种能力：
+     * <pre>
+     *   yolox-nano + [person]                    → 人形检测
+     *   yolox-nano + [car,truck,bus,motorcycle]  → 车辆检测
+     *   yolox-nano + []                          → 全目标检测
+     * </pre>
+     * 所以场景是模型之上的一层薄封装：<b>不为每种能力准备一份模型文件</b>，
+     * 加能力往往只需要加一条配置。
+     *
+     * <p>没配 {@code vision.scenarios} 时自动派生：每个模型生成一个
+     * 「全目标检测」场景，保证「只配了 models 也能用」。
+     */
+    public List<VisionProperties.Scenario> allScenarios() {
+        List<VisionProperties.Scenario> configured = props.getScenarios();
+        if (configured != null && !configured.isEmpty()) {
+            List<VisionProperties.Scenario> out = new ArrayList<>();
+            for (VisionProperties.Scenario s : configured) {
+                if (s != null && s.id() != null && !s.id().isBlank()) {
+                    out.add(s);
+                }
+            }
+            return out;
+        }
+        // 派生：一个模型一个「全目标检测」场景
+        List<VisionProperties.Scenario> out = new ArrayList<>();
+        for (VisionProperties.Model m : props.getModels()) {
+            if (m.getId() == null || m.getId().isBlank()) {
+                continue;
+            }
+            String name = m.getDisplayName() == null || m.getDisplayName().isBlank()
+                    ? m.getId() : m.getDisplayName();
+            out.add(new VisionProperties.Scenario(
+                    m.getId(), m.getId(), name,
+                    m.getCategory() == null ? CATEGORY_GENERAL : m.getCategory(),
+                    m.getOnlyLabels() == null ? List.of() : m.getOnlyLabels(),
+                    "自动派生（未配置 vision.scenarios）",
+                    m.getEstimatedMsPerFrame()));
+        }
+        return out;
+    }
+
+    /** 按 id 取场景；不存在返回 {@code null}。 */
+    public VisionProperties.Scenario scenario(String scenarioId) {
+        if (scenarioId == null || scenarioId.isBlank()) {
+            return null;
+        }
+        for (VisionProperties.Scenario s : allScenarios()) {
+            if (scenarioId.equals(s.id())) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** 默认场景 id：优先 default-model 对应的场景，否则第一个。 */
+    public String defaultScenarioId() {
+        List<VisionProperties.Scenario> all = allScenarios();
+        if (all.isEmpty()) {
+            return null;
+        }
+        String modelId = defaultModelId();
+        if (modelId != null) {
+            for (VisionProperties.Scenario s : all) {
+                if (modelId.equals(s.modelId())) {
+                    return s.id();
+                }
+            }
+        }
+        return all.get(0).id();
+    }
+
+    /**
+     * 场景实际生效的标签过滤。
+     *
+     * <p>取场景自己的 labels；为空时取模型声明的 onlyLabels；
+     * 都为空表示不过滤（全目标）。
+     */
+    public List<String> scenarioLabels(String scenarioId) {
+        VisionProperties.Scenario s = scenario(scenarioId);
+        if (s == null) {
+            return List.of();
+        }
+        if (s.labels() != null && !s.labels().isEmpty()) {
+            return s.labels();
+        }
+        VisionProperties.Model m = declaration(s.modelId());
+        if (m != null && m.getOnlyLabels() != null && !m.getOnlyLabels().isEmpty()) {
+            return m.getOnlyLabels();
+        }
+        return List.of();
     }
 
     /**
@@ -246,19 +367,26 @@ public class VisionModelRegistry {
             return DetectorConfig.OutputFormat.valueOf(raw.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException e) {
             log.warn("未知的输出格式 '{}'，按默认 {} 处理（可选: YOLO_CHANNEL_FIRST / "
-                    + "YOLO_ANCHOR_FIRST / YOLOX）", raw, DetectorConfig.DEFAULT_FORMAT);
+                    + "YOLO_ANCHOR_FIRST / YOLOX / YUNET）", raw, DetectorConfig.DEFAULT_FORMAT);
             return DetectorConfig.DEFAULT_FORMAT;
         }
     }
 
-    /** 解析预处理口径：{@code yolox} / {@code yolo}，其余按格式推导。 */
+    /**
+     * 解析预处理口径：{@code yolox} / {@code yolo} / {@code yunet}。
+     *
+     * <p><b>为什么 yunet 必须单独一个口径</b>：它虽然是 BGR + 0~255（与 yolox 相同），
+     * 但<b>不 letterbox</b> —— YuNet 官方就是直接 {@code cv2.resize} 拉成正方形。
+     * 借用 yolox 的 letterbox 会让输入分布偏离训练口径，实测掉分且框偏。
+     */
     private static DetectorConfig.Preprocess parsePreprocess(String raw) {
         String v = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         return switch (v) {
             case "yolox" -> DetectorConfig.Preprocess.yolox();
+            case "yunet" -> DetectorConfig.Preprocess.yunet();
             case "yolo", "yolov8", "yolov5" -> DetectorConfig.Preprocess.yolo();
             default -> {
-                log.warn("未知的预处理口径 '{}'，按 yolo 处理（可选: yolox / yolo）", raw);
+                log.warn("未知的预处理口径 '{}'，按 yolo 处理（可选: yolox / yolo / yunet）", raw);
                 yield DetectorConfig.Preprocess.yolo();
             }
         };

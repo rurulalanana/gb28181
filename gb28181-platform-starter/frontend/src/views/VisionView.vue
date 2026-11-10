@@ -99,6 +99,45 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="检测能力" min-width="180">
+          <template #default="{ row }">
+            <!--
+              场景（能力）列。这是多模型功能的核心呈现：
+              显示「人形检测」「车辆检测」这种能力名，而不是模型文件名 ——
+              运维关心的是「这一路在检测什么」，不是「用的哪个 .onnx」。
+              下拉可直接切换，切换会重启这一路（场景决定模型，必须重新装配）。
+            -->
+            <el-select
+              :model-value="row.scenarioId || ''"
+              size="small"
+              :disabled="!canWrite"
+              placeholder="未设置"
+              style="width: 100%"
+              @change="(v) => changeScenario(row, v)"
+            >
+              <el-option
+                v-for="s in scenarios"
+                :key="s.id"
+                :value="s.id"
+                :label="s.name"
+                :disabled="!s.available"
+              >
+                <el-tooltip
+                  :content="scenarioTip(s)"
+                  placement="right"
+                  :show-after="400"
+                  popper-class="scenario-tip-popper"
+                >
+                  <div class="scenario-opt">
+                    <span class="scenario-opt-name">{{ s.name }}</span>
+                    <span class="scenario-opt-meta">{{ scenarioMeta(s) }}</span>
+                  </div>
+                </el-tooltip>
+              </el-option>
+            </el-select>
+          </template>
+        </el-table-column>
+
         <el-table-column label="累计推理" width="110" align="center">
           <template #default="{ row }">
             <span class="mono">{{ row.inferredFrames || 0 }}</span>
@@ -157,9 +196,32 @@
           size="small"
         />
         <span class="picker-bar-spacer" />
-        <span class="text-muted">
-          已选 <b>{{ picked.length }}</b> 个
-        </span>
+        <!--
+          场景选择放在这里而不是每行一个：批量添加时通常是「把这几路都配成人形检测」，
+          逐行选太啰嗦。要单独改某一路，添加后在主表里改即可。
+        -->
+        <span class="picker-scenario-label">检测能力</span>
+        <el-select v-model="pickScenario" size="small" style="width: 210px">
+          <el-option
+            v-for="s in scenarios"
+            :key="s.id"
+            :value="s.id"
+            :label="s.name"
+            :disabled="!s.available"
+          >
+            <el-tooltip
+              :content="scenarioTip(s)"
+              placement="right"
+              :show-after="400"
+              popper-class="scenario-tip-popper"
+            >
+              <div class="scenario-opt">
+                <span class="scenario-opt-name">{{ s.name }}</span>
+                <span class="scenario-opt-meta">{{ scenarioMeta(s) }}</span>
+              </div>
+            </el-tooltip>
+          </el-option>
+        </el-select>
       </div>
 
       <el-table
@@ -246,7 +308,9 @@ const rows = ref([])
 const loading = ref(false)
 /** 首次加载完成标志：用来避免「未启用」状态标签在数据到达前先闪一下。 */
 const ready = ref(false)
-const meta = reactive({ fps: null, confidenceThreshold: null, defaultModel: '', enabled: false, available: false })
+/** 可用场景（检测能力）列表。 */
+const scenarios = ref([])
+const meta = reactive({ fps: null, confidenceThreshold: null, defaultModel: '', defaultScenario: '', enabled: false, available: false })
 const enabled = computed(() => meta.enabled)
 const available = computed(() => meta.available)
 const runningCount = computed(() => rows.value.filter((r) => r.running).length)
@@ -300,6 +364,28 @@ function summaryOf(row) {
   return parts.join(' · ')
 }
 
+/**
+ * 场景下拉的副标题。
+ *
+ * <p>显示「模型 + 单帧耗时」而不是标签列表：两个「人形检测」的标签都是 person，
+ * 光看标签分不出该选哪个，而「tiny / 150ms」才是真正的取舍点。
+ */
+function scenarioMeta(s) {
+  const parts = []
+  if (s.modelId) parts.push(s.modelId)
+  if (s.estimatedMsPerFrame > 0) parts.push(`${s.estimatedMsPerFrame}ms`)
+  return parts.join(' · ')
+}
+
+/** 场景下拉的悬浮说明：说清它到底检出什么。 */
+function scenarioTip(s) {
+  const lines = []
+  if (s.description) lines.push(s.description)
+  const labels = s.labels && s.labels.length ? s.labels.join(', ') : '全部 COCO 类别'
+  lines.push(`检出类别：${labels}`)
+  return lines.join('\n')
+}
+
 async function load() {
   loading.value = true
   try {
@@ -307,8 +393,14 @@ async function load() {
     meta.enabled = !!d.enabled
     meta.available = !!d.available
     meta.defaultModel = d.defaultModel || ''
+    meta.defaultScenario = d.defaultScenario || ''
     meta.fps = d.fps
     meta.confidenceThreshold = d.confidenceThreshold
+    scenarios.value = d.scenarios || []
+    // 添加对话框默认选默认场景
+    if (!pickScenario.value && meta.defaultScenario) {
+      pickScenario.value = meta.defaultScenario
+    }
     const list = d.channels || []
     rows.value = list.map((r) => {
       const m = channelMeta.value.get(metaKey(r.deviceId, r.channelId))
@@ -319,6 +411,25 @@ async function load() {
   } finally {
     loading.value = false
     ready.value = true
+  }
+}
+
+/**
+ * 切换某通道的检测能力（场景）。
+ *
+ * <p>后端会重启这一路：场景决定用哪个模型和哪套标签过滤，
+ * 而这两者是在启动时装配进流水线的，改配置不会自动生效。
+ */
+async function changeScenario(row, scenarioId) {
+  if (!scenarioId || scenarioId === row.scenarioId) return
+  try {
+    await visionApi.updateScenario(row.channelId, scenarioId)
+    ElMessage.success('已切换检测能力，正在重启这一路')
+    await load()
+  } catch (e) {
+    ElMessage.error(e.message || '切换失败')
+    // 失败要把下拉恢复到实际值，否则界面显示的和后端不一致
+    await load()
   }
 }
 
@@ -378,6 +489,8 @@ const onlyOnline = ref(true)
 const pickerTableRef = ref(null)
 const picked = ref([])
 const saving = ref(false)
+/** 批量添加时用的场景（检测能力）。 */
+const pickScenario = ref('')
 
 /** 已添加的通道编码集合，用于在选人列表里标「已添加」并禁止重复选。 */
 const addedSet = computed(() => new Set(rows.value.map((r) => r.channelId)))
@@ -446,7 +559,7 @@ async function savePicked() {
   const failed = []
   for (const p of picked.value) {
     try {
-      await visionApi.addChannel(p.deviceId, p.channelId, '')
+      await visionApi.addChannel(p.deviceId, p.channelId, pickScenario.value, '')
       ok++
     } catch (e) {
       failed.push(`${p.name || p.channelId}: ${e.message || '失败'}`)
@@ -623,10 +736,43 @@ onMounted(async () => {
   flex: 1;
 }
 
+.picker-scenario-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+
+/* 场景下拉项：名称 + 模型/耗时，让人知道这个能力到底检出什么 */
+.scenario-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scenario-opt-name {
+  font-size: 13px;
+}
+
+.scenario-opt-meta {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+
 .pick-hint {
   margin-top: 12px;
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.7;
+}
+</style>
+
+<style>
+/* tooltip 是 teleport 到 body 的，作用域样式盖不到，必须用全局 + popper-class */
+.scenario-tip-popper {
+  max-width: 320px;
+  white-space: pre-line;
+  line-height: 1.6;
 }
 </style>

@@ -82,6 +82,26 @@ public record DetectorConfig(
         public static Preprocess yolox() {
             return new Preprocess(1f, ChannelOrder.BGR, true, 114);
         }
+
+        /**
+         * YuNet 人脸检测风格：0~255、BGR、<b>直接拉伸不 letterbox</b>。
+         *
+         * <p>这三个口径都是<b>实测定的</b>，不是猜的（同一张 416×234 的监控截图，
+         * 用同一套解码，只换预处理）：
+         * <pre>
+         *   BGR + 0~255 + 拉伸  → 最高分 0.892，3 张脸
+         *   RGB + 0~255 + 拉伸  → 最高分 0.708，2 张脸
+         *   加 sigmoid          → 最高分 0.710，框位置不变但分数整体下降
+         * </pre>
+         * 所以：通道顺序必须是 BGR（模型是 OpenCV 系训的），
+         * <b>不能加 sigmoid</b>（导出的 cls/obj 已经是概率）。
+         *
+         * <p>为什么不用 letterbox：YuNet 官方实现就是 {@code cv2.resize} 直接拉成
+         * 正方形。改成 letterbox 会让输入分布偏离训练时的口径，反而掉分。
+         */
+        public static Preprocess yunet() {
+            return new Preprocess(1f, ChannelOrder.BGR, false, 0);
+        }
     }
 
     /** 默认预处理：YOLOv8 风格。 */
@@ -112,7 +132,25 @@ public record DetectorConfig(
         /** YOLOv5/v7 默认导出：{@code [1, N, 4+C]}，候选在前，无 obj，坐标已解码。 */
         YOLO_ANCHOR_FIRST,
         /** YOLOX 官方导出：{@code [1, N, 5+C]}，含 obj，坐标<b>未解码</b>，分数是 logits。 */
-        YOLOX
+        YOLOX,
+        /**
+         * YuNet 人脸检测：<b>12 个输出</b>，按尺度分成 cls/obj/bbox/kps 四组。
+         *
+         * <pre>
+         *   cls_8  [1, 6400, 1]    cls_16  [1, 1600, 1]   cls_32  [1, 400, 1]
+         *   obj_8  [1, 6400, 1]    obj_16  [1, 1600, 1]   obj_32  [1, 400, 1]
+         *   bbox_8 [1, 6400, 4]    bbox_16 [1, 1600, 4]   bbox_32 [1, 400, 4]
+         *   kps_8  [1, 6400,10]    kps_16  [1, 1600,10]   kps_32  [1, 400,10]
+         * </pre>
+         *
+         * <p><b>不能套用任何 YOLO 分支</b>：单输出的解析逻辑拿不到这些张量，
+         * 而 {@code result.get(0)} 只会返回 {@code cls_8} —— 直接当检测结果解析
+         * 会得到「每行 1 个字段，类别数为负」而静默返回空列表。
+         *
+         * <p>分数是 {@code sqrt(cls × obj)}（几何平均），且 cls/obj 已是概率，
+         * <b>不需要 sigmoid</b>。
+         */
+        YUNET
     }
 
     /** 默认格式：YOLOv8 风格（{@code [1, 84, 8400]}）。 */

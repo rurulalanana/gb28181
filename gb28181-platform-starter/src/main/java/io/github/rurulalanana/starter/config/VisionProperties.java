@@ -48,17 +48,13 @@ public class VisionProperties {
     private List<Model> models = new ArrayList<>();
 
     /**
-     * 启用检测的通道（按通道编码，如 {@code 10001-1}）。
-     *
-     * <p>不配置时不检测任何通道。之所以不用「全部通道自动开启」：
-     * 每个通道都要常驻一路 ffmpeg，无脑全开会在几分钟内把 CPU 打满。
-     */
-    private List<String> channels = new ArrayList<>();
-
-    /**
      * 每个通道用的模型 id（{@code models[].id}）。
      *
      * <p>不配置时用第一个模型。
+     *
+     * <p><b>注意</b>：这里只是「新建通道时的默认值」。具体某一路用哪个模型，
+     * 存在 {@code gb_vision_channel.model_id} 里 —— 通道配置已经全部移到平台界面，
+     * 一个通道可以只跑人形、另一个跑车辆，靠的就是那一列。
      */
     private String defaultModel = "";
 
@@ -107,8 +103,14 @@ public class VisionProperties {
     /** 是否保存事件截图。 */
     private boolean saveSnapshot = true;
 
-    /** 只关心这些标签（空表示全部）。用于「只检测人形」。 */
-    private List<String> labels = new ArrayList<>();
+    /**
+     * 场景清单（模型 + 标签过滤）。
+     *
+     * <p>不配置时由 {@link #models} 自动派生：每个模型生成一个「全目标检测」场景。
+     * 配了就以配置为准 —— 这样才能用同一份权重派生出
+     * 「人形 / 车辆 / 全目标」多个可选项。
+     */
+    private List<Scenario> scenarios = new ArrayList<>();
 
     /**
      * 一个模型的声明。
@@ -147,5 +149,70 @@ public class VisionProperties {
 
         /** 类别表。留空时用内置的 COCO 80 类。 */
         private List<String> labels = new ArrayList<>();
+
+        /**
+         * 展示名（界面上给人看）。
+         *
+         * <p>不填时用 {@link #id}。{@code id} 是稳定键（存库、存日志），
+         * 不该随文案变化；而界面上「yolox-nano」对运维没有意义，
+         * 显示成「通用检测（小模型）」才看得懂。
+         */
+        private String displayName = "";
+
+        /**
+         * 用途分类：决定这个模型适合什么场景，界面按它分组。
+         *
+         * <p>取值见 {@code VisionModelRegistry.CATEGORY_*}：
+         * {@code general}（通用目标）/ {@code person}（人形）/ {@code vehicle}（车辆）/
+         * {@code face}（人脸）/ {@code helmet}（安全帽）/ {@code fire}（烟火）。
+         *
+         * <p><b>为什么要有这个字段</b>：模型的差别不只是「快慢」，而是
+         * <b>能检出什么</b>。只列一堆文件名，运维不知道该选哪个；
+         * 按用途分组后「我要检测安全帽」能直接找到。
+         */
+        private String category = "general";
+
+        /**
+         * 只关心这些标签（空 = 全部）。
+         *
+         * <p>这是<b>按模型</b>过滤，不是全局过滤。同一个 COCO 模型，
+         * 「人形检测」场景配 {@code [person]}、「车辆检测」场景配
+         * {@code [car,truck,bus,motorcycle]} —— 用同一份权重得到两种用途，
+         * 不需要两个模型文件。
+         *
+         * <p>所以下面 {@link #getScenarioLabels()} 用「模型 id → 标签」的映射
+         * 允许一个模型派生多个「场景」，界面上表现为多个可选项。
+         */
+        private List<String> onlyLabels = new ArrayList<>();
+
+        /** 单帧推理耗时参考（毫秒，界面上标注，便于运维估算 CPU）。 */
+        private int estimatedMsPerFrame = 0;
+    }
+
+    /**
+     * 「场景」：一个模型 + 一组标签过滤。
+     *
+     * <h3>为什么要引入这个概念</h3>
+     * 用户要的是「人形检测 / 车辆检测 / 人脸检测」这些<b>能力</b>，
+     * 而不是「yolox-nano / yolox-tiny」这些<b>文件名</b>。
+     * 同一个 COCO 权重，只要换标签过滤就是另一种能力：
+     * <pre>
+     *   yolox-nano + [person]                        → 人形检测
+     *   yolox-nano + [car,truck,bus,motorcycle]      → 车辆检测
+     *   yolox-nano + []                              → 全目标检测
+     * </pre>
+     * 所以「场景」是模型之上的一层薄封装，配置里写几个场景，
+     * 界面上就出现几个可选项，<b>不用为每种能力准备一份模型文件</b>。
+     *
+     * @param id       场景 id（存库用，稳定）
+     * @param modelId  用哪个模型
+     * @param name     展示名
+     * @param category 用途分类
+     * @param labels   只保留这些标签（空 = 全部）
+     * @param description 说明文字
+     * @param estimatedMsPerFrame 单帧推理耗时参考（毫秒）
+     */
+    public record Scenario(String id, String modelId, String name, String category,
+                           List<String> labels, String description, int estimatedMsPerFrame) {
     }
 }

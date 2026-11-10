@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,7 +56,7 @@ public class VisionController {
         data.put("defaultModel", registry.defaultModelId());
         data.put("declaredModels", registry.declaredModelIds());
         data.put("loadedModels", registry.loadedModelIds());
-        data.put("configuredChannels", props.getChannels());
+        data.put("configuredChannels", visionService.activeChannels());
         data.put("runningCount", visionService.runningCount());
         data.put("running", visionService.status());
         data.put("fps", props.getFps());
@@ -155,24 +156,61 @@ public class VisionController {
         data.put("enabled", props.isEnabled());
         data.put("available", registry.available());
         data.put("defaultModel", registry.defaultModelId());
+        data.put("defaultScenario", registry.defaultScenarioId());
         data.put("fps", props.getFps());
         data.put("confidenceThreshold", props.getConfidenceThreshold());
         data.put("channels", rows);
         data.put("count", rows.size());
         data.put("runningCount", visionService.runningCount());
+        data.put("scenarios", scenarioViews());
         return ApiResponse.ok(data);
+    }
+
+    /**
+     * 可选场景列表（界面「添加通道」时的下拉项）。
+     *
+     * <p>每项带上「模型 + 标签过滤 + 用途分类」，让运维能按能力选，
+     * 而不是按文件名猜。{@code available=false} 表示模型文件缺失，
+     * 界面应置灰 —— 提前告诉用户「这个选不了」比让他选了再报错好。
+     */
+    private List<Map<String, Object>> scenarioViews() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        List<String> loaded = registry.loadedModelIds();
+        List<String> declared = registry.declaredModelIds();
+        for (VisionProperties.Scenario s : registry.allScenarios()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", s.id());
+            row.put("modelId", s.modelId());
+            row.put("name", s.name());
+            row.put("category", s.category());
+            row.put("description", s.description());
+            List<String> labels = registry.scenarioLabels(s.id());
+            row.put("labels", labels);
+            row.put("estimatedMsPerFrame", s.estimatedMsPerFrame());
+            /*
+             * 可用性：模型必须被声明（文件存在）才可能加载。
+             * 已加载是更强的信号，但懒加载意味着「没被用过就还没加载」，
+             * 所以只要声明了就算可用，界面不必区分「已加载 / 可加载」。
+             */
+            row.put("available", declared.contains(s.modelId()));
+            row.put("loaded", loaded.contains(s.modelId()));
+            out.add(row);
+        }
+        return out;
     }
 
     /**
      * 新增一路检测通道。
      *
-     * <p>参数用 snake_case（与平台其它接口一致）：{@code device_id} / {@code channel_id}。
+     * <p>参数用 snake_case（与平台其它接口一致）：
+     * {@code device_id} / {@code channel_id} / {@code scenario_id}。
      */
     @Operation(summary = "新增检测通道")
     @PostMapping("/channels/add")
     public ApiResponse<Map<String, Object>> addChannel(
             @RequestParam(required = false) String device_id,
             @RequestParam String channel_id,
+            @RequestParam(required = false) String scenario_id,
             @RequestParam(required = false) String remark) {
         StpUtil.checkLogin();
         if (!props.isEnabled()) {
@@ -184,11 +222,40 @@ public class VisionController {
         if (channel_id == null || channel_id.isBlank()) {
             throw BizException.badRequest("通道编码不能为空");
         }
-        boolean inserted = visionService.addChannel(device_id, channel_id, remark);
+        if (scenario_id != null && !scenario_id.isBlank()
+                && registry.scenario(scenario_id) == null) {
+            throw BizException.badRequest("场景不存在: " + scenario_id);
+        }
+        boolean inserted = visionService.addChannel(device_id, channel_id, scenario_id, remark);
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("channel_id", channel_id);
         data.put("inserted", inserted);
         data.put("msg", inserted ? "已添加" : "该通道已在列表中");
+        return ApiResponse.ok(data);
+    }
+
+    /**
+     * 修改某通道的场景。
+     *
+     * <p>会重启这一路检测（场景决定模型与标签过滤，必须重新装配流水线）。
+     */
+    @Operation(summary = "修改检测通道的场景")
+    @PostMapping("/channels/scenario")
+    public ApiResponse<Map<String, Object>> updateScenario(
+            @RequestParam String channel_id,
+            @RequestParam String scenario_id) {
+        StpUtil.checkLogin();
+        if (registry.scenario(scenario_id) == null) {
+            throw BizException.badRequest("场景不存在: " + scenario_id);
+        }
+        boolean ok = visionService.updateChannelScenario(channel_id, scenario_id);
+        if (!ok) {
+            throw BizException.badRequest("该通道不在检测列表中");
+        }
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("channel_id", channel_id);
+        data.put("scenario_id", scenario_id);
+        data.put("updated", true);
         return ApiResponse.ok(data);
     }
 

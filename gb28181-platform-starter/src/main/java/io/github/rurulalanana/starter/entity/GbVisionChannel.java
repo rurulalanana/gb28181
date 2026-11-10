@@ -43,6 +43,17 @@ public class GbVisionChannel implements Serializable {
      */
     private String channelId;
 
+    /**
+     * 这一路要跑哪个「场景」（{@code vision.scenarios[].id}）。
+     *
+     * <h3>为什么要按通道绑定场景</h3>
+     * 不同通道的诉求不一样：大门口要看人形，停车场要看车辆，
+     * 仓库要看烟火。如果只能全局选一个模型，加模型就失去意义了。
+     *
+     * <p>为空时退回 {@code vision.default-model}，兼容老数据。
+     */
+    private String scenarioId;
+
     /** 备注：为什么开这一路（人工填，便于运维回溯）。 */
     private String remark;
 

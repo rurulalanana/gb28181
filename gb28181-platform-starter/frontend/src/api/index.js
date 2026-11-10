@@ -153,13 +153,24 @@ export const visionApi = {
    * 否则用户看不到自己配过什么。
    */
   channels: () => get('/vision/channels'),
-  /** 新增一路检测通道（幂等：已存在时 inserted=false）。 */
-  addChannel: (deviceId, channelId, remark) =>
+  /**
+   * 新增一路检测通道（幂等：已存在时 inserted=false）。
+   *
+   * @param {string} deviceId 设备编码
+   * @param {string} channelId 通道编码
+   * @param {string} scenarioId 检测能力（场景 id）；空则用默认场景
+   * @param {string} remark 备注
+   */
+  addChannel: (deviceId, channelId, scenarioId, remark) =>
     post('/vision/channels/add', {
       device_id: deviceId,
       channel_id: channelId,
+      scenario_id: scenarioId,
       remark
     }),
+  /** 修改某通道的检测能力（场景）。后端会重启这一路。 */
+  updateScenario: (channelId, scenarioId) =>
+    post('/vision/channels/scenario', { channel_id: channelId, scenario_id: scenarioId }),
   /** 移除一路检测通道（按通道编码）。 */
   removeChannel: (channelId) => post('/vision/channels/remove', { channel_id: channelId })
 }
