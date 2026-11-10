@@ -10,8 +10,12 @@
     为什么 pointer-events: none：
     播放器自身要接管单击/双击全屏、右键菜单。叠加层一旦吃指针事件，
     用户就会「点画面没反应」。这里只做视觉呈现。
+
+    ⚠️ 图层必须对齐「画面内容」而不是容器：video 用 object-fit: contain 渲染，
+    容器与画面之间有黑边（见 measure）。不对齐的话，框会整体偏移，
+    黑边越宽偏得越多 —— 表现为「框画进黑边里」。
   -->
-  <div v-if="visible" class="vision-layer" :class="{ 'is-stale': stale }">
+  <div v-if="visible" ref="layerRef" class="vision-layer" :class="{ 'is-stale': stale }" :style="layerStyle">
     <div
       v-for="(d, i) in boxes"
       :key="i"
@@ -30,7 +34,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   /**
@@ -39,9 +43,6 @@ const props = defineProps({
    * 其中 box 是**归一化**坐标（0~1，左上角 + 宽高）。
    */
   detections: { type: Array, default: () => [] },
-  /** 视频原始宽高（归一化坐标乘它得到像素，仅用于展示文案） */
-  videoWidth: { type: Number, default: 0 },
-  videoHeight: { type: Number, default: 0 },
   /** 结果是否已过期（超过若干个轮询周期没更新）。过期时整体变灰，避免用户以为还在实时检测。 */
   stale: { type: Boolean, default: false },
   /** 中文标签映射，未命中时直接显示英文类名 */
@@ -60,7 +61,133 @@ const DEFAULT_LABELS = {
   cat: '猫'
 }
 
+const layerRef = ref(null)
+
+/**
+ * 画面内容相对父容器的矩形（像素）。
+ *
+ * <p>归一化坐标是相对「视频画面」的，而父容器（.video-box）比画面大（有黑边），
+ * 所以必须把图层收缩到画面矩形上，框才不会整体偏移。
+ */
+const rect = ref({ left: 0, top: 0, width: 0, height: 0 })
+
+const layerStyle = computed(() => {
+  const r = rect.value
+  if (!r.width || !r.height) {
+    return {}
+  }
+  return {
+    left: `${r.left}px`,
+    top: `${r.top}px`,
+    width: `${r.width}px`,
+    height: `${r.height}px`
+  }
+})
+
 const visible = computed(() => !props.stale && props.detections.length > 0)
+
+/**
+ * 量出「画面内容」的矩形。
+ *
+ * <p>video 元素用 {@code object-fit: contain} 撑满容器，画面在元素内部居中并
+ * 按长宽比缩放 —— 元素的四条边不等于画面的四条边。所以：
+ * <pre>
+ *   scale  = min(元素宽 / 视频宽, 元素高 / 视频高)
+ *   画面宽 = 视频宽 * scale；画面高 = 视频高 * scale
+ *   画面左上角 = 元素左上角 + (元素尺寸 - 画面尺寸) / 2
+ * </pre>
+ * 与 {@code TrackBox.measureVideo} 同一套算法（框选跟踪也靠它区分黑边）。
+ */
+function measure() {
+  const layer = layerRef.value
+  if (!layer || !layer.parentElement) {
+    return
+  }
+  const parent = layer.parentElement
+  const video = parent.querySelector('video')
+  const pr = parent.getBoundingClientRect()
+  if (!pr.width || !pr.height) {
+    return
+  }
+  if (!video) {
+    // 画面还没起来：退回容器矩形，至少不会算出 NaN
+    rect.value = { left: 0, top: 0, width: pr.width, height: pr.height }
+    return
+  }
+  const vr = video.getBoundingClientRect()
+  const nw = video.videoWidth || 0
+  const nh = video.videoHeight || 0
+  if (!vr.width || !vr.height || !nw || !nh) {
+    rect.value = { left: 0, top: 0, width: pr.width, height: pr.height }
+    return
+  }
+  const scale = Math.min(vr.width / nw, vr.height / nh)
+  const dispW = nw * scale
+  const dispH = nh * scale
+  rect.value = {
+    left: vr.left - pr.left + (vr.width - dispW) / 2,
+    top: vr.top - pr.top + (vr.height - dispH) / 2,
+    width: dispW,
+    height: dispH
+  }
+}
+
+/**
+ * 节流版 measure。
+ *
+ * <p>播放器会持续改控制栏 DOM（timeupdate 每秒数次），子树观察会因此被高频触发；
+ * {@code getBoundingClientRect} 会强制回流，不节流会在多格同屏时变成性能问题。
+ * 100ms 足够跟住「画面尺寸变化」这类慢变量。
+ */
+let lastMeasureAt = 0
+function measureThrottled() {
+  const now = Date.now()
+  if (now - lastMeasureAt < 100) {
+    return
+  }
+  lastMeasureAt = now
+  measure()
+}
+
+let resizeObserver = null
+let mutationObserver = null
+let alignTimer = null
+
+onMounted(() => {
+  measure()
+  const parent = layerRef.value && layerRef.value.parentElement
+  if (parent) {
+    // 容器尺寸变化（分屏切换、窗口缩放、全屏）
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => measureThrottled())
+      resizeObserver.observe(parent)
+    }
+    /*
+     * video 元素会被播放器重建（卡顿重拉时 LivePlayer 整体换节点），
+     * 只监听尺寸不够 —— 新节点的 videoWidth 要等 metadata 才有值。
+     * 子树变动时重测，覆盖「换节点」与「metadata 到达」两种时机。
+     */
+    mutationObserver = new MutationObserver(() => measureThrottled())
+    mutationObserver.observe(parent, { childList: true, subtree: true })
+  }
+  // 起播后 2 秒内每 200ms 重测一次：metadata 到达的时刻不固定
+  alignTimer = setInterval(measureThrottled, 200)
+  setTimeout(() => {
+    if (alignTimer) {
+      clearInterval(alignTimer)
+      alignTimer = null
+    }
+  }, 2000)
+})
+
+onBeforeUnmount(() => {
+  if (resizeObserver) resizeObserver.disconnect()
+  if (mutationObserver) mutationObserver.disconnect()
+  if (alignTimer) clearInterval(alignTimer)
+})
+
+// 检测结果变化时（画面可能刚换）也重测一次
+watch(() => props.detections, () => measureThrottled())
 
 /**
  * 把归一化框换算成百分比定位。
@@ -120,7 +247,7 @@ function clamp01(v) {
 <style scoped>
 .vision-layer {
   position: absolute;
-  inset: 0;
+  /* left/top/width/height 由 JS 量出的画面矩形决定（见 measure） */
   /* 只做视觉呈现，绝不抢播放器的点击/双击全屏 */
   pointer-events: none;
   z-index: 3;
