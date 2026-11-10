@@ -582,6 +582,41 @@ scale  = min(元素宽 / 视频宽, 元素高 / 视频高)
 | 旧（图层=容器） | 48 | 落在黑边里 |
 | 新（图层=画面） | 98 | 完全在画面内 |
 
+### 7.0.1 全屏时必须把图层「搬进」全屏元素
+
+**现象**：点播放器控制栏的全屏，画面正常但检测框全没了。
+
+**根因**：浏览器进入元素全屏后**只渲染那个元素的子树**，它的兄弟与祖先全部不显示。
+图层是播放器根节点的兄弟（`.video-box` 下与 `.video-container` 并列），
+而控制栏的全屏按钮请求的是它自己内部的 `.video-js` —— 图层不在那个子树里，于是凭空消失。
+
+**修法**（`composables/useFullscreenOverlay.js`，`VisionBox` / `TrackBox` 共用）：
+
+1. 监听 `fullscreenchange`，判断全屏元素是不是「在自己这一格里面」：
+   - `host.contains(fs)` → 要把图层 `<Teleport>` 进 `fs`；
+   - 否则（整面电视墙全屏，`fs` 是我们的祖先）→ 留在原地，搬过去反而会错位。
+2. 搬进去之后定位改用 **`position: fixed` + 视口坐标**。
+   `.video-js` 是否 `position: relative` 由播放器决定，继续用 absolute 会把坐标
+   算到不确定的祖先上；全屏元素占满视口，fixed 与嵌套层级无关。
+3. 进出全屏会换父元素，`ResizeObserver` / `MutationObserver` 要跟着重挂。
+4. **不能只靠事件**：实测（headless Chromium）`document.fullscreenElement` 会变
+   但 `fullscreenchange` 不派发。所以 `measure()` 里捎带调一次 `sync()`
+   （读属性 + 幂等 setTarget，代价可忽略），靠 `ResizeObserver` 触发的 measure 兜住。
+
+`TrackBox` 还多一步：它要接管指针事件，全屏时若铺满整个播放器会把底部控制栏
+（含「退出全屏」）盖住，用户只能按 Esc 才能出来。所以全屏时把图层尺寸收到
+「画面内容」矩形，既不吃控制栏，也让坐标换算不必再扣黑边。
+
+**验证**（`http://160.202.254.65:48088/live`，真实 video.js 播放器）：
+
+| 状态 | 图层父元素 | 定位 | 图层矩形 | 视频元素矩形 |
+|---|---|---|---|---|
+| 非全屏 | `.video-box` | absolute | 274×154 @ (162,538) | 426×154 @ (86,538) |
+| 全屏中 | `.video-js`（= 全屏元素） | fixed | 971×546 @ (0,125) | 971×796 @ (0,0) |
+
+971×546 正是 16:9 的画面内容（上下各 125px 黑边），框全落在画面内；
+命中测试在框内取到 `.vision-box` 而不是 `.vjs-tech`，说明图层确实在视频之上。
+
 ### 7.1 实时推送：WebSocket（首选），REST 仅作降级
 
 **首选 `ws://<host>/api/v1/vision/ws?token=xxx`**，不要再轮询 `detections`。

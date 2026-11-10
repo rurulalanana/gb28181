@@ -6,39 +6,48 @@
     为什么用 div 画框而不是 canvas：框选是矩形，一个带 border 的 div 就够，
     不需要像素级绘制，还能直接用 CSS 做半透明遮罩（canvas 要实现同样效果得手写合成）。
   -->
-  <div
-    v-if="active"
-    ref="layerRef"
-    class="track-layer"
-    :class="{ 'is-drawing': drawing }"
-    @pointerdown="onDown"
-    @pointermove="onMove"
-    @pointerup="onUp"
-    @pointercancel="cancel"
-    @contextmenu.prevent="cancel"
-  >
-    <div v-if="rect" class="track-mask">
-      <div
-        class="track-rect"
-        :style="{ left: rect.left + 'px', top: rect.top + 'px', width: rect.w + 'px', height: rect.h + 'px' }"
-      >
-        <span v-if="rect.w > 60 && rect.h > 24" class="track-size">
-          {{ boxW }} × {{ boxH }}
-        </span>
+  <!--
+    播放器自己全屏时必须把图层搬进全屏元素，否则框选图层连同选框一起消失。
+    全屏时同时把图层尺寸收到「画面内容」矩形：本图层要接管指针事件，
+    铺满整个播放器会把底部控制栏吃掉，用户就退不出全屏了。
+  -->
+  <Teleport :to="teleportTarget || 'body'" :disabled="!teleportTarget">
+    <div
+      v-if="active"
+      ref="layerRef"
+      class="track-layer"
+      :class="{ 'is-drawing': drawing }"
+      :style="fullscreenStyle"
+      @pointerdown="onDown"
+      @pointermove="onMove"
+      @pointerup="onUp"
+      @pointercancel="cancel"
+      @contextmenu.prevent="cancel"
+    >
+      <div v-if="rect" class="track-mask">
+        <div
+          class="track-rect"
+          :style="{ left: rect.left + 'px', top: rect.top + 'px', width: rect.w + 'px', height: rect.h + 'px' }"
+        >
+          <span v-if="rect.w > 60 && rect.h > 24" class="track-size">
+            {{ boxW }} × {{ boxH }}
+          </span>
+        </div>
+      </div>
+
+      <div class="track-tip">
+        <span>{{ tipText }}</span>
+        <button type="button" class="track-tip-cancel" @click.stop="cancel">取消（Esc）</button>
       </div>
     </div>
-
-    <div class="track-tip">
-      <span>{{ tipText }}</span>
-      <button type="button" class="track-tip-cancel" @click.stop="cancel">取消（Esc）</button>
-    </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup>
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { controlApi } from '@/api'
+import { useFullscreenOverlay } from '@/composables/useFullscreenOverlay'
 
 const props = defineProps({
   /** 设备编码 */
@@ -62,6 +71,37 @@ const layerRef = ref(null)
 const drawing = ref(false)
 const rect = ref(null)
 const sending = ref(false)
+
+/**
+ * 播放器自己全屏时把图层搬进全屏元素（否则框选图层整个消失）。
+ * 见 useFullscreenOverlay。
+ */
+const {
+  target: teleportTarget,
+  fullscreen: inFullscreen,
+  sync: syncFullscreen
+} = useFullscreenOverlay(layerRef)
+
+// 进出全屏：搬完 DOM 再量，否则拿到的是搬之前的父元素
+watch(teleportTarget, () => {
+  nextTick(measureFullscreenRect)
+})
+
+// 激活框选时也量一次：图层从「不存在」变成「存在」，尺寸可能已经变了
+watch(
+  () => props.active,
+  (on) => {
+    if (on) {
+      nextTick(measureFullscreenRect)
+    }
+  }
+)
+
+// 窗口尺寸变化（全屏切换、旋转屏幕）后画面矩形会变
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', measureFullscreenRect)
+  onUnmounted(() => window.removeEventListener('resize', measureFullscreenRect))
+}
 
 /** 指针起点（相对图层）。 */
 let startX = 0
@@ -115,6 +155,48 @@ function measureVideo() {
   }
 }
 
+/**
+ * 全屏时把图层收到「画面内容」矩形。
+ *
+ * <p>为什么必须收：本图层要接管指针事件（否则拖框会被播放器吃掉）。
+ * 全屏时图层铺满整个播放器的话，底部控制栏（含「退出全屏」）会被盖住，
+ * 用户只能按 Esc 才能出来 —— 这比框选不可用更糟。
+ *
+ * <p>收成画面矩形还有第二个好处：坐标换算是按图层矩形算的（见 onDown/onMove），
+ * 图层与画面重合后不必再扣黑边偏移。
+ */
+const fullscreenRect = ref(null)
+
+const fullscreenStyle = computed(() =>
+  fullscreenRect.value
+    ? {
+        position: 'fixed',
+        inset: 'auto',
+        left: `${fullscreenRect.value.left}px`,
+        top: `${fullscreenRect.value.top}px`,
+        width: `${fullscreenRect.value.width}px`,
+        height: `${fullscreenRect.value.height}px`
+      }
+    : {}
+)
+
+function measureFullscreenRect() {
+  if (!inFullscreen.value) {
+    fullscreenRect.value = null
+    return
+  }
+  const m = measureVideo()
+  if (!m) {
+    return
+  }
+  fullscreenRect.value = {
+    left: m.left,
+    top: m.top,
+    width: m.nativeW * m.scale,
+    height: m.nativeH * m.scale
+  }
+}
+
 /** 屏幕坐标 → 视频原始分辨率像素，并夹取到画面范围内。 */
 function toNative(clientX, clientY, m) {
   const x = Math.round((clientX - m.left) / m.scale)
@@ -128,6 +210,9 @@ function toNative(clientX, clientY, m) {
 function onDown(e) {
   if (props.disabled || sending.value) return
   if (e.button !== 0) return
+  // 捎带校正全屏状态与图层矩形：拖动开始前拿到的必须是最新值
+  syncFullscreen()
+  measureFullscreenRect()
   const layer = layerRef.value
   if (!layer) return
   const lr = layer.getBoundingClientRect()

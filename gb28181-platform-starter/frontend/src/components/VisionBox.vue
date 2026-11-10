@@ -15,26 +15,34 @@
     容器与画面之间有黑边（见 measure）。不对齐的话，框会整体偏移，
     黑边越宽偏得越多 —— 表现为「框画进黑边里」。
   -->
-  <div v-if="visible" ref="layerRef" class="vision-layer" :class="{ 'is-stale': stale }" :style="layerStyle">
-    <div
-      v-for="(d, i) in boxes"
-      :key="i"
-      class="vision-box"
-      :style="d.style"
-    >
-      <span class="vision-label" :class="{ 'is-inside': d.inTop }">{{ d.text }}</span>
-    </div>
+  <!--
+    播放器自己全屏时必须把图层搬进全屏元素：全屏只渲染那个元素的子树，
+    否则框会连同图层一起消失（见 useFullscreenOverlay）。
+    disabled 时渲染在原地，与改造前完全一致。
+  -->
+  <Teleport :to="teleportTarget || 'body'" :disabled="!teleportTarget">
+    <div v-if="visible" ref="layerRef" class="vision-layer" :class="{ 'is-stale': stale }" :style="layerStyle">
+      <div
+        v-for="(d, i) in boxes"
+        :key="i"
+        class="vision-box"
+        :style="d.style"
+      >
+        <span class="vision-label" :class="{ 'is-inside': d.inTop }">{{ d.text }}</span>
+      </div>
 
-    <!-- 顶部汇总：一眼看到「现在画面里有几个人」 -->
-    <div v-if="summary" class="vision-summary">
-      <span class="vision-dot" :class="stale ? 'is-stale' : 'is-live'" />
-      <span>{{ summary }}</span>
+      <!-- 顶部汇总：一眼看到「现在画面里有几个人」 -->
+      <div v-if="summary" class="vision-summary">
+        <span class="vision-dot" :class="stale ? 'is-stale' : 'is-live'" />
+        <span>{{ summary }}</span>
+      </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useFullscreenOverlay } from '@/composables/useFullscreenOverlay'
 
 const props = defineProps({
   /**
@@ -76,15 +84,36 @@ const layerStyle = computed(() => {
   if (!r.width || !r.height) {
     return {}
   }
-  return {
+  const style = {
     left: `${r.left}px`,
     top: `${r.top}px`,
     width: `${r.width}px`,
     height: `${r.height}px`
   }
+  /*
+   * 全屏时图层被 teleport 进播放器根节点，那个元素是否 position: relative
+   * 由播放器决定 —— 继续用 absolute 会把坐标算到不确定的祖先上。
+   * 全屏元素占满视口，改成 fixed + 视口坐标就与嵌套层级无关了。
+   */
+  if (inFullscreen.value) {
+    style.position = 'fixed'
+  }
+  return style
 })
 
 const visible = computed(() => !props.stale && props.detections.length > 0)
+
+/**
+ * 进出全屏时的搬迁。
+ *
+ * <p>播放器控制栏的全屏按钮请求的是它自己内部的 `.video-js` ——
+ * 那是本图层的兄弟节点，不在同一个全屏子树里，不搬的话框会整个消失。
+ */
+const {
+  target: teleportTarget,
+  fullscreen: inFullscreen,
+  sync: syncFullscreen
+} = useFullscreenOverlay(layerRef)
 
 /**
  * 量出「画面内容」的矩形。
@@ -99,13 +128,21 @@ const visible = computed(() => !props.stale && props.detections.length > 0)
  * 与 {@code TrackBox.measureVideo} 同一套算法（框选跟踪也靠它区分黑边）。
  */
 function measure() {
+  // 捎带校正全屏状态：见 useFullscreenOverlay 里关于「事件不一定派发」的说明
+  syncFullscreen()
   const layer = layerRef.value
   if (!layer || !layer.parentElement) {
     return
   }
   const parent = layer.parentElement
   const video = parent.querySelector('video')
-  const pr = parent.getBoundingClientRect()
+  /*
+   * 全屏时父元素是播放器根节点，但图层用的是 position: fixed ——
+   * 坐标基准是视口，所以原点取 (0,0)，而不是父元素的矩形。
+   */
+  const pr = inFullscreen.value
+    ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    : parent.getBoundingClientRect()
   if (!pr.width || !pr.height) {
     return
   }
@@ -153,23 +190,42 @@ let resizeObserver = null
 let mutationObserver = null
 let alignTimer = null
 
+/**
+ * 挂观察者到当前父元素。
+ *
+ * <p>进出全屏会改变父元素（自然宿主 ↔ 播放器根节点），
+ * 观察者必须跟着搬，否则全屏后画面尺寸变化不再触发重测。
+ */
+function observeParent() {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+  if (mutationObserver) {
+    mutationObserver.disconnect()
+    mutationObserver = null
+  }
+  const parent = layerRef.value && layerRef.value.parentElement
+  if (!parent) {
+    return
+  }
+  // 容器尺寸变化（分屏切换、窗口缩放、进出全屏）
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => measureThrottled())
+    resizeObserver.observe(parent)
+  }
+  /*
+   * video 元素会被播放器重建（卡顿重拉时 LivePlayer 整体换节点），
+   * 只监听尺寸不够 —— 新节点的 videoWidth 要等 metadata 才有值。
+   * 子树变动时重测，覆盖「换节点」与「metadata 到达」两种时机。
+   */
+  mutationObserver = new MutationObserver(() => measureThrottled())
+  mutationObserver.observe(parent, { childList: true, subtree: true })
+}
+
 onMounted(() => {
   measure()
-  const parent = layerRef.value && layerRef.value.parentElement
-  if (parent) {
-    // 容器尺寸变化（分屏切换、窗口缩放、全屏）
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(() => measureThrottled())
-      resizeObserver.observe(parent)
-    }
-    /*
-     * video 元素会被播放器重建（卡顿重拉时 LivePlayer 整体换节点），
-     * 只监听尺寸不够 —— 新节点的 videoWidth 要等 metadata 才有值。
-     * 子树变动时重测，覆盖「换节点」与「metadata 到达」两种时机。
-     */
-    mutationObserver = new MutationObserver(() => measureThrottled())
-    mutationObserver.observe(parent, { childList: true, subtree: true })
-  }
+  observeParent()
   // 起播后 2 秒内每 200ms 重测一次：metadata 到达的时刻不固定
   alignTimer = setInterval(measureThrottled, 200)
   setTimeout(() => {
@@ -178,6 +234,15 @@ onMounted(() => {
       alignTimer = null
     }
   }, 2000)
+})
+
+// 图层被 teleport 进出全屏：父元素换了，要重新挂观察者并立刻量一次
+watch(teleportTarget, () => {
+  // 等 Vue 把 DOM 搬完再量，否则拿到的是搬之前的父元素
+  requestAnimationFrame(() => {
+    observeParent()
+    measure()
+  })
 })
 
 onBeforeUnmount(() => {
