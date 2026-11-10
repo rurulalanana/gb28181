@@ -31,11 +31,17 @@
         :disabled="noTalk"
         :title="talkTip"
         :aria-label="talkTip"
+        data-testid="ptz-talk"
         @click="toggleTalk"
       >
         <el-icon :size="18" aria-hidden="true"><Microphone /></el-icon>
       </el-button>
     </div>
+
+    <!-- 对讲状态：一个持续占用设备音频通道的动作，必须能一眼看到还开着 -->
+    <p v-if="talkStatus" class="ptz-talk-status" :class="{ 'is-talking': talking }">
+      {{ talkStatus }}
+    </p>
 
     <!--
       变倍 / 光圈 / 聚焦是三条不同指令：变倍 0x10/0x20、光圈 0x44/0x48、聚焦 0x41/0x42
@@ -3305,8 +3311,12 @@ const talk = reactive({
   active: false,
   starting: false,
   talkId: '',
+  /** 设备上是否有对讲会话（**包含自己那一路**，语义见服务端 /talk/busy）。 */
   busy: false,
+  /** 占用者显示名（服务端已把登录 id 翻成用户名），只用于提示文案。 */
   busyOwner: '',
+  /** 占用者是不是自己：是的话「开始」这个动作其实是「继续/恢复」，不该禁用。 */
+  busySelf: false,
   /** 已收到的下行帧数：用来区分「设备支持双工」和「压根没回传音频」。 */
   downFrames: 0
 })
@@ -3325,23 +3335,48 @@ const talking = computed(() => (isSdkDevice.value ? talk.active : gbTalking.valu
  * <p>SDK 设备<b>不看能力表</b>：能力表里 TALK 标的是「国标 Broadcast 不可用」，
  * 而这个按钮在 SDK 设备上走的是 NetSDK 对讲，与国标无关。
  * 真正的互斥由服务端管（同一台设备同时只能一人喊话），这里只禁「正在建立」和「别人在喊」。
+ *
+ * <p><b>{@code talk.busy} 必须配合 {@code !talk.active} 判断。</b>
+ * 服务端 {@code /talk/busy} 的语义是「这台设备上有没有对讲会话」——
+ * <b>包含自己那一路</b>。只看 busy 的话，自己一开始对讲，下一次
+ * {@code refreshTalkBusy()}（start 之后立刻调一次、之后每 15 秒一次）就把按钮置灰，
+ * 于是<b>只能开始、不能停止</b>，用户只能去关掉整个预览弹窗（实测踩过）。
  */
 const noTalk = computed(() => {
   if (isSdkDevice.value) {
-    return !props.serial || talk.starting || talk.busy
+    if (!props.serial || talk.starting) return true
+    // 自己占着的时候 busy 也是 true，这时必须允许点（点了是「停止」或「恢复」）
+    return talk.busy && !talk.busySelf
   }
   return cap.disabled('TALK', inactive.value)
 })
 
-/** 中心键的悬停提示。 */
+/** 中心键的悬停提示。顺序很重要：active 优先于 busy，否则「停止」永远显示不出来。 */
 const talkTip = computed(() => {
   if (isSdkDevice.value) {
     if (!props.serial) return '请先选择通道'
     if (talk.starting) return '正在建立通道…'
-    if (talk.busy) return `${talk.busyOwner || '他人'} 正在喊话`
-    return talk.active ? '停止对讲' : '开始对讲'
+    if (talk.active) return '停止对讲'
+    if (talk.busy && !talk.busySelf) return `${talk.busyOwner || '他人'} 正在喊话`
+    if (talk.busy) return '继续对讲（你还有一路没结束）'
+    return '开始对讲'
   }
   return talking.value ? '停止喊话' : tip('TALK', '开始喊话')
+})
+
+/**
+ * 方向盘下方的状态行。
+ *
+ * <p>删掉「收听设备/麦克风」两个假开关后，这里补一句真实状态：
+ * 对讲是个持续占用设备音频通道的动作，用户必须能一眼看到「还开着」和「收到了几帧」，
+ * 否则会反复点击（每次点击都要重建通道，设备侧会更慢）。
+ */
+const talkStatus = computed(() => {
+  if (!isSdkDevice.value) return ''
+  if (talk.starting) return '正在建立通道…'
+  if (talk.busy && !talk.busySelf) return `${talk.busyOwner || '他人'} 正在喊话，稍后再试`
+  if (!talk.active) return ''
+  return talk.downFrames > 0 ? `对讲中（已收 ${talk.downFrames} 帧）` : '对讲中（等待设备音频）'
 })
 
 /** 播放/采集共用的 AudioContext（懒建，浏览器要求用户手势后才能 resume）。 */
@@ -3371,10 +3406,14 @@ async function refreshTalkBusy() {
     const res = await dahuaApi.talkBusy({ serial: props.serial })
     if (disposed) return
     talk.busy = !!res?.busy
-    talk.busyOwner = res?.owner || ''
+    // 老后端没有 ownerName：退回登录 id，至少能看出「不是自己」
+    talk.busyOwner = res?.ownerName || res?.owner || ''
+    // 老后端没有 self 字段：退化成「本地 active 就是自己」，行为与修复前一致
+    talk.busySelf = res?.self === undefined ? talk.active : !!res.self
   } catch (e) {
     // 查询失败不影响手动操作：真正的互斥由后端 /talk/start 兜底
     talk.busy = false
+    talk.busySelf = talk.active
   }
 }
 
@@ -3780,6 +3819,21 @@ function reportTrackResult(res, action) {
 
 .ptz-talk.is-talking :deep(.el-icon) {
   color: #fff;
+}
+
+.ptz-talk-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--el-text-color-secondary);
+}
+
+.ptz-talk-status.is-talking {
+  color: var(--el-color-danger);
 }
 
 @keyframes talk-pulse {

@@ -58,6 +58,8 @@ public class DahuaController {
     private final DahuaDownloadService downloadService;
     private final DahuaRecordPlanService recordPlanService;
     private final DahuaPtzConfigService ptzConfigService;
+    /** 只用于把「谁在喊话」的登录 id 翻成用户名（提示文案里显示 "177 正在喊话" 没人看得懂）。 */
+    private final io.github.rurulalanana.starter.service.UserService userService;
     private final DahuaRegisterTable registerTable;
     private final DeviceProvisionService provisionService;
     private final DeviceService deviceService;
@@ -640,14 +642,45 @@ public class DahuaController {
         return ApiResponse.ok();
     }
 
-    /** 该设备当前谁在喊话（{@code null} 表示空闲）。 */
+    /**
+     * 该设备当前谁在喊话（{@code null} 表示空闲）。
+     *
+     * <p>{@code busy} 的语义是「这台设备上有没有对讲会话」，<b>包含调用者自己那一路</b>。
+     * 所以额外回一个 {@code self}：前端据此区分「别人占着，我不能点」与
+     * 「我自己开着，这个按钮的作用是停止」。
+     * 只看 busy 会让前端在自己开始对讲后就把停止按钮置灰 —— 实测踩过。
+     *
+     * <p>{@code self=true} 时前端再点「开始」是安全的：{@link DahuaTalkService#start}
+     * 对同一 owner 返回<b>已有会话</b>而不是报错（浏览器刷新/重连正是靠这条）。
+     */
     @Operation(summary = "查询设备对讲占用状态")
     @GetMapping("/talk/busy")
     public ApiResponse<Map<String, Object>> talkBusy(@RequestParam String serial) {
         StpUtil.checkLogin();
+        String me = String.valueOf(StpUtil.getLoginId());
         String owner = talkService.busyOwner(serial);
         return ApiResponse.ok(Map.of("busy", owner != null,
-                "owner", owner == null ? "" : owner));
+                "owner", owner == null ? "" : owner,
+                "ownerName", usernameOf(owner),
+                "self", me.equals(owner)));
+    }
+
+    /**
+     * 登录 id → 用户名。查不到就退回原始值：
+     * 提示文案宁可显示 "177"，也不能因为一个展示字段把整个接口搞挂。
+     */
+    private String usernameOf(String loginId) {
+        if (loginId == null || loginId.isBlank()) {
+            return "";
+        }
+        try {
+            var u = userService.findById(Long.parseLong(loginId.trim()));
+            return u == null || u.getUsername() == null ? loginId : u.getUsername();
+        } catch (NumberFormatException e) {
+            return loginId;
+        } catch (RuntimeException e) {
+            return loginId;
+        }
     }
 
     // ==================== 录像下载 ====================
