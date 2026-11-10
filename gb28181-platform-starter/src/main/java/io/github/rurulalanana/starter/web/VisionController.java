@@ -265,17 +265,21 @@ public class VisionController {
      * <p>按<b>通道编码</b>删除（不是「设备/通道」键）：界面上的删除按钮
      * 针对的就是通道本身，不该因为设备编码传错而删不掉。
      */
-    @Operation(summary = "移除检测通道")
+    /**
+     * 移除检测通道（<b>幂等</b>）。
+     *
+     * <p>不在配置里时返回 {@code removed=false} 而不报错：播放弹窗里的「停止检测」
+     * 对「临时开的一次性检测」和「配置了长期检测的通道」都要能用，
+     * 让调用方按 {@code removed} 决定要不要再补一次本地停止。
+     */
+    @Operation(summary = "移除检测通道（幂等）")
     @PostMapping("/channels/remove")
     public ApiResponse<Map<String, Object>> removeChannel(@RequestParam String channel_id) {
         StpUtil.checkLogin();
-        boolean ok = visionService.removeChannel(channel_id);
-        if (!ok) {
-            throw BizException.badRequest("该通道不在检测列表中");
-        }
+        boolean removed = visionService.removeChannel(channel_id);
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("channel_id", channel_id);
-        data.put("removed", true);
+        data.put("removed", removed);
         return ApiResponse.ok(data);
     }
 }

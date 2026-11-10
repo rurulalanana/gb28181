@@ -443,7 +443,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, visionApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@/player/resolvePlayUrls'
@@ -579,17 +579,13 @@ async function toggleVision() {
 /**
  * 点击画面上的 AI 按钮。
  *
- * <h3>为什么「检测中」时点一下不直接停，而是弹选择</h3>
- * 这一路可能在「AI 检测」页面里被配置成<b>长期检测</b>。直接停掉只影响当前进程，
- * 30 秒后 {@code retryPending()} 会把它重新启动 —— 用户会看到
- * 「点了停止，过一会儿又自己开了」，以为坏了。
+ * <h3>为什么「检测中」时点一下就直接停</h3>
+ * 检测配置的唯一来源是平台（{@code gb_vision_channel}），不再有配置文件。
+ * 所以「停止」= 从平台配置里移除这一路：删掉配置行的同时后端会把运行实例停掉，
+ * 30 秒后的 {@code retryPending()} 也不会再把它开回来。
  *
- * <p>所以要把两种意图分开问清楚：
- * <ul>
- *   <li><b>暂时停止</b> —— 只停这一次，配置保留（重试会再开）</li>
- *   <li><b>不再检测</b> —— 从配置里移除，重启也不再开</li>
- * </ul>
- * 用下拉菜单而不是确认框：确认框只能问「是/否」，问不出这两个选项。
+ * <p>如果这一路只是临时开的（不在配置里），移除接口返回 {@code removed=false}，
+ * 此时补一次本地停止即可 —— 两种情况调用方不用区分，也不弹任何选择框。
  */
 async function onAiClick() {
   const key = visionKey.value
@@ -603,53 +599,28 @@ async function onAiClick() {
     if (ok) syncVisionWatched()
     return
   }
-  const action = await chooseStopAction()
-  if (action === 'remove') {
-    await removeFromConfig(key)
-  } else if (action === 'pause') {
-    const ok = await vision.toggle(key, false)
-    if (ok) syncVisionWatched()
-    ElMessage.info('已停止检测（配置保留，稍后会自动恢复；如需永久关闭请选「不再检测」）')
-  }
+  await stopDetection(key)
 }
 
 /**
- * 弹「停止方式」选择。
+ * 停止检测：优先从平台配置移除（永久，不再自动恢复）；
+ * 不在配置里的临时检测只停本地。
  *
- * <p>用 ElMessageBox 的三个按钮：取消 / 暂时停止 / 不再检测。
- * 返回值 {@code null} 表示用户取消。
+ * @param key 检测键 {@code 设备编码/通道编码}
  */
-function chooseStopAction() {
-  return new Promise((resolve) => {
-    ElMessageBox.confirm(
-      '这一路可能已被配置为长期检测。请选择停止方式：',
-      '停止 AI 检测',
-      {
-        distinguishCancelAndClose: true,
-        confirmButtonText: '不再检测',
-        cancelButtonText: '暂时停止',
-        type: 'warning',
-        // 让「暂时停止」看起来是更轻的选择，避免误点造成配置被删
-        confirmButtonClass: 'el-button--danger'
-      }
-    )
-      .then(() => resolve('remove'))
-      .catch((a) => resolve(a === 'cancel' ? 'pause' : null))
-  })
-}
-
-/** 从配置中移除这一路（永久）。 */
-async function removeFromConfig(key) {
-  const target = previewTarget.value
-  if (!target) return
+async function stopDetection(key) {
+  const channelId = key.includes('/') ? key.substring(key.indexOf('/') + 1) : key
   try {
-    await visionApi.removeChannel(target.id)
-    // 后端已 stop，但本地状态要立刻反映，否则按钮还写着「AI 检测中」
+    const res = await visionApi.removeChannel(channelId)
+    if (!res || !res.removed) {
+      // 临时检测：配置里没有这一路，只停本地
+      await vision.toggle(key, false)
+    }
     await vision.refreshStatus()
     syncVisionWatched()
-    ElMessage.success('已从 AI 检测配置中移除，重启后也不会自动开启')
+    ElMessage.success('已停止检测，重启后也不会自动开启')
   } catch (e) {
-    ElMessage.error(e.message || '移除失败')
+    ElMessage.error(e.message || '停止失败')
   }
 }
 

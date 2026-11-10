@@ -299,7 +299,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, controlApi, visionApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
@@ -370,57 +370,30 @@ async function toggleAi() {
     if (ok) syncWatched()
     return
   }
-  /*
-   * 已在检测中：先问清是「暂时停」还是「不再检测」。
-   *
-   * 直接停会让配置了长期检测的通道在 30 秒后被 retryPending 重新开启，
-   * 表现为「点了停止又自己开了」。两种意图必须分开，见 ChannelView 同名方法。
-   */
-  const action = await chooseStopAction()
-  if (action === 'remove') {
-    await removeFromConfig(key)
-  } else if (action === 'pause') {
-    const ok = await vision.toggle(key, false)
-    if (ok) syncWatched()
-    ElMessage.info('已停止检测（配置保留，稍后会自动恢复；如需永久关闭请选「不再检测」）')
-  }
+  await stopDetection(key)
 }
 
 /**
- * 弹「停止方式」选择：取消 / 暂时停止 / 不再检测。
+ * 停止检测：优先从平台配置移除（永久，不再自动恢复）；
+ * 不在配置里的临时检测只停本地。
  *
- * @returns {Promise<'pause'|'remove'|null>} null 表示用户关掉了对话框
+ * <p>检测配置的唯一来源是平台（{@code gb_vision_channel}），所以「停止」
+ * 就是把它从配置里删掉 —— 不弹选择框，见 ChannelView 同名方法。
+ *
+ * @param key 检测键 {@code 设备编码/通道编码}
  */
-function chooseStopAction() {
-  return new Promise((resolve) => {
-    ElMessageBox.confirm(
-      '这一路可能已被配置为长期检测。请选择停止方式：',
-      '停止 AI 检测',
-      {
-        distinguishCancelAndClose: true,
-        confirmButtonText: '不再检测',
-        cancelButtonText: '暂时停止',
-        type: 'warning',
-        confirmButtonClass: 'el-button--danger'
-      }
-    )
-      .then(() => resolve('remove'))
-      .catch((a) => resolve(a === 'cancel' ? 'pause' : null))
-  })
-}
-
-/** 从配置中移除这一路（永久，重启也不会自动开）。 */
-async function removeFromConfig(key) {
-  // 键是「设备编码/通道编码」，移除接口按通道编码删，取斜杠后半段
-  const slash = key.indexOf('/')
-  const channelId = slash < 0 ? key : key.substring(slash + 1)
+async function stopDetection(key) {
+  const channelId = key.includes('/') ? key.substring(key.indexOf('/') + 1) : key
   try {
-    await visionApi.removeChannel(channelId)
+    const res = await visionApi.removeChannel(channelId)
+    if (!res || !res.removed) {
+      await vision.toggle(key, false)
+    }
     await vision.refreshStatus()
     syncWatched()
-    ElMessage.success('已从 AI 检测配置中移除，重启后也不会自动开启')
+    ElMessage.success('已停止检测，重启后也不会自动开启')
   } catch (e) {
-    ElMessage.error(e.message || '移除失败')
+    ElMessage.error(e.message || '停止失败')
   }
 }
 
