@@ -31,6 +31,23 @@
       <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
         <el-icon><FullScreen /></el-icon> 全屏
       </el-button>
+      <!--
+        AI 检测开关：作用于「当前云台绑定的那一格」。
+        不做成全局开关，因为检测是按通道开的（每路一个常驻 ffmpeg，有 CPU 成本），
+        用户需要能精确控制是哪几路在跑。
+      -->
+      <el-button
+        v-if="vision.enabled.value"
+        size="small"
+        class="ai-btn"
+        :class="{ 'is-on': aiOn }"
+        :disabled="!aiTile"
+        :loading="aiTile ? vision.isPending(aiKey) : false"
+        :title="aiTile ? (aiOn ? '停止这一路的 AI 检测' : '对这一路开启人形检测') : '请先上屏一个通道'"
+        @click="toggleAi"
+      >
+        <el-icon><Aim /></el-icon> {{ aiOn ? 'AI 检测中' : 'AI 检测' }}
+      </el-button>
     </div>
     <!-- 页头 -->
 
@@ -149,6 +166,16 @@
               :serial="tile.serial"
               :code="tile.code"
               mode="targettrack"
+            />
+
+            <!--
+              AI 检测框。只对「已开启检测且正在播放」的格子渲染。
+              结果过期时组件内部会变灰，避免用户把冻结的框当成实时结果。
+            -->
+            <VisionBox
+              v-if="tile.channelKey && tile.playing && vision.isOn(tile.channelKey)"
+              :detections="vision.boxesOf(tile.channelKey)"
+              :stale="vision.isStale(tile.channelKey)"
             />
 
             <div v-if="!tile.playing" class="tile-overlay">
@@ -277,8 +304,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, controlApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
+import { useVision } from '@/composables/useVision'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TrackBox from '@/components/TrackBox.vue'
+import VisionBox from '@/components/VisionBox.vue'
 
 const channels = ref([])
 const gridSize = ref(4)
@@ -309,6 +338,49 @@ const ptzTile = computed(() => {
 /** 框选图层当前挂在哪一格（0 = 未激活）。同一时刻只允许一格在框选。 */
 const trackTileId = ref(0)
 const trackActive = ref(false)
+
+// ==================== AI 检测 ====================
+
+/**
+ * 检测结果轮询与开关。
+ *
+ * <p>「作用于哪一格」复用云台绑定的小格（{@link ptzTile}）：
+ * 用户的注意力本来就在那一格上，再单独选一次反而多余。
+ */
+const vision = useVision()
+
+/** AI 检测作用的格子：与云台同源，避免两套「当前选中」互相打架。 */
+const aiTile = computed(() => ptzTile.value)
+const aiKey = computed(() => aiTile.value?.channelKey || '')
+const aiOn = computed(() => vision.isOn(aiKey.value))
+
+/** 开/关当前格的检测。 */
+async function toggleAi() {
+  const key = aiKey.value
+  if (!key) {
+    ElMessage.warning('请先上屏一个通道')
+    return
+  }
+  if (!aiTile.value.playing) {
+    ElMessage.warning('请等画面出来后再开启检测')
+    return
+  }
+  const ok = await vision.toggle(key, !aiOn.value)
+  if (ok) syncWatched()
+}
+
+/**
+ * 把「上屏且已开检测」的通道同步给轮询器。
+ *
+ * 只轮这些通道：给没开检测的通道拉检测结果是纯浪费，
+ * 而全部通道都轮会在 16 分屏时变成每秒 16 个请求。
+ */
+function syncWatched() {
+  const keys = tiles.value
+    .filter((t) => t.channelKey && t.playing && vision.isOn(t.channelKey))
+    .map((t) => t.channelKey)
+  vision.setWatched(keys)
+}
 
 /**
  * 自动跟踪状态。设备不支持时不会报错也不做任何动作（标准里没有回传通道），
@@ -597,6 +669,12 @@ function playerOf(tile) {
       ([s, p]) => {
         tile.state = s
         tile.playing = p
+        /*
+         * 播放状态变化要同步检测轮询列表：没在播放时拉检测结果没意义
+         * （后端可能还在跑，但用户看不到画面，白耗带宽），
+         * 而刚播起来的通道要立刻开始轮询，否则要等下一次上屏才出框。
+         */
+        syncWatched()
       },
       { immediate: true }
     )
@@ -793,6 +871,12 @@ onMounted(async () => {
   // ws-flv 引擎不需要额外的 SDK 下载（解封装用 xgplayer-transmuxer、音频用 Web Audio），不做预热
   await loadChannels()
   await applyQueryPlay()
+  /*
+   * 读一次检测总览：页面刷新后要让用户看到「哪几路本来就在检测」，
+   * 否则按钮显示「AI 检测」而实际后端已经在跑，点一下反而变成关闭。
+   */
+  await vision.refreshStatus()
+  syncWatched()
 })
 
 onUnmounted(() => {
@@ -1217,6 +1301,20 @@ onUnmounted(() => {
   color: var(--accent-ink);
   border-color: var(--brand-300);
   background: var(--brand-50);
+}
+
+/* AI 检测按钮：开启时用醒目的绿色，让人一眼看出「这一路正在耗 CPU 做推理」 */
+.ai-btn.is-on {
+  color: #fff;
+  border-color: #52c41a;
+  background: #52c41a;
+}
+
+.ai-btn.is-on:hover,
+.ai-btn.is-on:focus {
+  color: #fff;
+  border-color: #73d13d;
+  background: #73d13d;
 }
 
 .panel-tabs {

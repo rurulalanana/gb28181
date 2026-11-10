@@ -126,6 +126,24 @@ export const streamApi = {
   relayStop: (params) => post('/stream/relay/stop', params)
 }
 
+/**
+ * AI 视觉识别接口（`/api/v1/vision/*`）。
+ *
+ * <p>「开启」是有状态、耗 CPU 的操作（每路一个常驻 ffmpeg + 一份推理配额），
+ * 所以是显式 POST，不能做成「查询即开启」。
+ *
+ * <p>detections 返回的框是<b>归一化坐标</b>（0~1），
+ * 前端乘画面尺寸即可 —— 主/子码流切换导致分辨率变化时框不会错位。
+ */
+export const visionApi = {
+  /** 总览：是否启用、可用模型、正在检测的通道及健康状态。 */
+  status: () => get('/vision/status'),
+  /** 某路最新检测框；channel 用「设备编码/通道编码」。 */
+  detections: (channel) => get('/vision/detections', { channel }),
+  start: (channel) => post('/vision/start', { channel }),
+  stop: (channel) => post('/vision/stop', { channel })
+}
+
 /** 设备录像（前端录像）接口（`/api/v1/playback/*`）。 */
 export const playbackApi = {
   recordList: (params) => get('/playback/recordlist', params),
