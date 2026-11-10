@@ -143,10 +143,37 @@ public class ZlmFrameSource implements FrameSource {
     /** 已产出的帧数（排障用）。 */
     private final AtomicLong produced = new AtomicLong();
 
+    /**
+     * 最后一帧的产出时间（毫秒），{@code 0} 表示本次启动后还没出过帧。
+     *
+     * <h3>为什么需要这个字段（真实故障）</h3>
+     * 实测踩过：某一路检测"卡住"了一小时 —— 进程在跑、attach 成功、
+     * {@code inferredFrames} 是一个很大的正数，界面上 {@code healthy=true}，
+     * 但画面里的框早就不动了。原因是 {@code inferredFrames} 是<b>累计值</b>，
+     * 只能回答「历史上有没有出过帧」，回答不了「现在还在不在出帧」。
+     *
+     * <p>所以必须额外记时间戳，用「距上一帧多久」判活。
+     */
+    private final AtomicLong lastFrameAt = new AtomicLong();
+
     /** 进程与拉流线程的句柄。 */
     private volatile Process process;
     private volatile Thread puller;
     private volatile Thread reader;
+
+    /**
+     * 当前拉流连接。
+     *
+     * <h3>为什么必须存它（stop 曾经卡 4 分钟）</h3>
+     * {@link Thread#interrupt()} <b>打断不了阻塞中的 socket read</b> ——
+     * 它只设置中断标志，而 {@code InputStream.read()} 不检查那个标志，
+     * 会一直等到超时（这里是 15 秒）或数据到达。
+     *
+     * <p>而拉流线程卡在 read 时，ffmpeg 的 stdin 就拿不到数据也不会收到 EOF，
+     * 于是它也不退出 —— 两者互等。所以停的时候必须
+     * <b>主动 {@code disconnect()}</b>，让 read 立刻抛异常返回。
+     */
+    private volatile HttpURLConnection connection;
 
     /**
      * @param sourceId  来源标识（通道编码，会透传到 {@link Frame#sourceId()}）
@@ -204,6 +231,9 @@ public class ZlmFrameSource implements FrameSource {
             // 重复 start：返回一个只停自己的句柄，避免把已有管道关掉
             return () -> { };
         }
+        // 记录启动时刻：从未出过帧时，静默时长要按这个算
+        startedAt = System.currentTimeMillis();
+        lastFrameAt.set(0);
 
         List<String> cmd = new ArrayList<>(List.of(
                 FFMPEG,
@@ -249,11 +279,54 @@ public class ZlmFrameSource implements FrameSource {
         return this::stop;
     }
 
-    /** 停止：先断流让 ffmpeg 收尾，超时再强杀。 */
+    /**
+     * 停止：先断流让 ffmpeg 收尾，超时再强杀。
+     *
+     * <h3>为什么这里必须「不等待」（实测卡过 4 分钟）</h3>
+     * 早先的写法是 {@code waitFor(3s)} 超时后调 {@code destroyForcibly()} 就返回。
+     * 看起来没问题，但实测出现过一次 <b>4 分 15 秒</b>才完成：
+     * 上游断流时 ffmpeg 的 stdout 写满管道阻塞在 write，
+     * 此时它的状态是 D/S（不可中断/可中断睡眠），SIGKILL 要等它从
+     * 系统调用返回才能生效，而读端（我们的 reader 线程）又在等它输出 ——
+     * 互相等死。
+     *
+     * <p>所以顺序必须是：
+     * <ol>
+     *   <li>先 {@code interrupt} 读/拉线程 —— 把管道两端都放掉，让 ffmpeg 的
+     *       write 拿到 EPIPE 而退出</li>
+     *   <li>关掉 stdin（告诉 ffmpeg 没有更多输入）</li>
+     *   <li>短等待，超时直接强杀，<b>强杀后不再等</b> —— 反正进程会被 init 回收</li>
+     * </ol>
+     *
+     * <p>「强杀后不再等」是刻意的：调用方（自愈逻辑 / 用户点停止）要的是
+     * 「尽快腾出资源」，而不是「确认进程已死」。真死了没死，下一次 start
+     * 会起新进程，旧进程被 SIGKILL 后必然消失。
+     */
     private void stop() {
         if (!running.compareAndSet(true, false)) {
             return;
         }
+        /*
+         * 第一步：先断开拉流连接，再放掉读/拉线程。
+         *
+         * 顺序不能反。反了的话 reader 还在读 ffmpeg 的 stdout，
+         * ffmpeg 就永远等不到 EPIPE，强杀也卡在系统调用里出不来。
+         *
+         * 而且光 interrupt 不够 —— 它打断不了阻塞的 socket read，
+         * 必须主动 disconnect 才能让 read 立刻抛异常返回。
+         */
+        HttpURLConnection conn = connection;
+        if (conn != null) {
+            try {
+                conn.disconnect();
+            } catch (Exception ignored) {
+                // 断开失败不影响后续强杀
+            }
+            connection = null;
+        }
+        interrupt(puller);
+        interrupt(reader);
+
         Process p = process;
         if (p != null) {
             try {
@@ -262,16 +335,17 @@ public class ZlmFrameSource implements FrameSource {
                 // 已经关了
             }
             try {
-                if (!p.waitFor(3, TimeUnit.SECONDS)) {
+                // 给 2 秒优雅退出；够正常收尾，又不至于让调用方干等
+                if (!p.waitFor(2, TimeUnit.SECONDS)) {
                     p.destroyForcibly();
+                    // 强杀后最多再等 1 秒确认，不再无限等
+                    p.waitFor(1, TimeUnit.SECONDS);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 p.destroyForcibly();
             }
         }
-        interrupt(puller);
-        interrupt(reader);
         process = null;
         log.info("视觉取帧已停止: source={} 累计出帧={}", sourceId, produced.get());
     }
@@ -344,6 +418,7 @@ public class ZlmFrameSource implements FrameSource {
                                 byte[] jpeg = frame.toByteArray();
                                 if (jpeg.length > 1024 && jpeg.length <= MAX_JPEG_BYTES) {
                                     produced.incrementAndGet();
+                                    lastFrameAt.set(System.currentTimeMillis());
                                     int[] wh = jpegSize(jpeg);
                                     /*
                                      * 宽高必须给真实值：Frame.usable() 要求
@@ -449,6 +524,37 @@ public class ZlmFrameSource implements FrameSource {
         return produced.get();
     }
 
+    /**
+     * 距最后一帧过去了多少毫秒；从未出过帧时返回自启动以来的时长。
+     *
+     * <p>这是判「卡住」的唯一可靠指标。{@link #producedFrames()} 是累计值，
+     * 只能证明「历史上出过帧」—— 卡了一小时它照样是个大正数。
+     *
+     * @return 静默时长（毫秒）
+     */
+    public long silentMillis() {
+        long last = lastFrameAt.get();
+        long base = last > 0 ? last : startedAt;
+        return base <= 0 ? 0 : System.currentTimeMillis() - base;
+    }
+
+    /** 本次启动的时间（用于「从未出过帧」时计算静默时长）。 */
+    private volatile long startedAt;
+
+    /**
+     * 是否已经「卡住」：超过 {@code maxSilentMs} 没有新帧。
+     *
+     * <p>阈值要给足余量：fps=4 时正常间隔 250ms，但上游突发式推流
+     * （实测有通道会停顿 2.5~3.85 秒）会短暂超时。取 30 秒 ——
+     * 比已知的最长突发停顿大一个量级，不会误判；同时 30 秒卡死
+     * 对运维来说也是「马上该查」的量级。
+     *
+     * @param maxSilentMs 允许的最大静默时长（毫秒）
+     */
+    public boolean stalled(long maxSilentMs) {
+        return running.get() && silentMillis() > maxSilentMs;
+    }
+
     /** 打开 HTTP-TS 流（与 FfmpegSnapService 相同的做法）。 */
     private InputStream openStream(String url) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
@@ -460,6 +566,8 @@ public class ZlmFrameSource implements FrameSource {
             conn.disconnect();
             throw new IOException("拉流失败 HTTP " + code);
         }
+        // 存起来供 stop() 主动断开：interrupt 打断不了阻塞的 socket read
+        connection = conn;
         return conn.getInputStream();
     }
 

@@ -40,21 +40,50 @@ public final class VisionPipeline implements AutoCloseable {
     private final ExecutorService workers;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong droppedFrames = new AtomicLong();
+
+    /**
+     * 因「排空积压」丢掉的帧数（背压）。
+     *
+     * <h3>为什么要和节流丢帧分开计数</h3>
+     * 两者含义完全不同，合并成一个数字时根本判断不出问题出在哪：
+     * <ul>
+     *   <li><b>背压丢弃</b>：推理追不上取帧，队列里积了好几帧，
+     *       只留最新一帧。这是<b>健康且必要</b>的 —— 实时叠框只需要最新画面。</li>
+     *   <li><b>节流丢弃</b>：帧到得比目标间隔还快，按 fps 主动限速。
+     *       这是<b>配置意图</b>，丢得多说明上游出帧比 fps 快。</li>
+     * </ul>
+     * 实测：两路都稳定在 3.0 fps（配置是 4.0），而推理线程只占 13.8% CPU ——
+     * 算力根本不是瓶颈。把两类计数分开后才能确认到底是哪边在丢。
+     */
+    private final AtomicLong backpressureDropped = new AtomicLong();
+
+    /** 因「未到目标间隔」丢掉的帧数（节流）。 */
+    private final AtomicLong throttleDropped = new AtomicLong();
+
     private final AtomicLong inferredFrames = new AtomicLong();
 
     /**
-     * 节流容差：允许比目标间隔早 10% 的帧通过。
+     * 令牌桶容量（单位：帧）。
      *
-     * <p>上游 {@code -vf fps=N} 的出帧间隔并不精确（实测在 990~1010ms 之间抖动），
-     * 用严格比较会把合法的 999ms 帧判成「太早」而丢弃，
-     * 结果 fps=1 的有效帧率只有 0.3~0.7。详见 {@code consume()} 里的说明。
+     * <p>2 而不是 1：留 1 帧的抖动余量。容量 1 会退化成「固定最小间隔」，
+     * 而那种判定在抖动下会系统性少算（详见 {@code consume()} 里的实测数据）。
+     *
+     * <p>也不要放大到 4 以上：桶越大，ffmpeg 重启一次性吐多帧时
+     * 能被连续推下去的帧就越多，CPU 会出现尖刺。
      */
-    private static final double THROTTLE_TOLERANCE = 0.9;
+    private static final double TOKEN_BUCKET_CAPACITY = 2.0;
 
     /** 单路的队列与节流状态。 */
     private static final class Lane {
         final ArrayBlockingQueue<Frame> queue;
         final AtomicLong lastInferMs = new AtomicLong(0);
+        /**
+         * 令牌桶余额（单位：帧）。只由该 lane 的唯一消费线程读写，无需同步。
+         *
+         * <p>容量 2 而不是 1：允许「1 帧」的抖动余量。
+         * 用 1 的话就退化成固定最小间隔，抖动下会系统性少算（见 consume 注释）。
+         */
+        double tokens = 2.0;
 
         Lane(int capacity) {
             this.queue = new ArrayBlockingQueue<>(Math.max(1, capacity));
@@ -110,6 +139,7 @@ public final class VisionPipeline implements AutoCloseable {
         if (!lane.queue.offer(frame)) {
             lane.queue.poll();
             droppedFrames.incrementAndGet();
+            backpressureDropped.incrementAndGet();
             lane.queue.offer(frame);
         }
     }
@@ -148,28 +178,55 @@ public final class VisionPipeline implements AutoCloseable {
             Frame newer;
             while ((newer = lane.queue.poll()) != null) {
                 droppedFrames.incrementAndGet();
+                backpressureDropped.incrementAndGet();
                 frame = newer;
             }
             /*
-             * 节流：未到间隔的帧直接丢弃（实时性优先于完整性）。
+             * 节流：用<b>令牌桶</b>而不是「固定最小间隔」。
              *
-             * <h3>为什么留 10% 容差（这里曾经把有效帧率砍掉一半）</h3>
-             * 上游 {@code -vf fps=N} 的出帧间隔是「约」1/N 秒，实测会在
-             * 990~1010ms 之间抖动。用严格的 {@code now - last < 1000} 判定，
-             * 凡是间隔 999ms 的帧都被当成「太早」丢掉，下一帧又要再等一个周期 ——
-             * 于是 fps=1 的实际有效帧率只有 0.3~0.7，且丢帧率高达 30~68%
-             * （实测三路：0.70 / 0.70 / 0.30 fps）。
+             * <h3>为什么固定最小间隔是错的（实测数据）</h3>
+             * 早先用 {@code now - last < minGap * 0.9} 判定。fps=1 时能工作
+             * （间隔 1000ms，容差 100ms 远大于抖动），但 fps=4 时失效：
+             * 目标间隔 250ms、容差只剩 25ms，而 {@code -vf fps=4.0} 的输出
+             * 抖动就有几十毫秒。更关键的是<b>丢帧后基准时间不前移</b> ——
+             * 下一帧要等间隔<b>变大</b>才通过，于是形成「过 1 丢 1」的稳定节奏，
+             * 系统性少算。
              *
-             * 留 10% 容差后，999ms 的帧能通过，同时仍能挡住
-             * 「ffmpeg 重启时一次性吐出多帧」这类真正的突发。
+             * <p>实测（两路，60 秒窗口，8 核机器）：
+             * <pre>
+             *   通道 1  推理 2.85 fps（目标 4.0）  背压丢 0    节流丢 70
+             *   通道 2  推理 1.52 fps（目标 4.0）  背压丢 51   节流丢 98
+             * </pre>
+             * 而推理线程只占 <b>13.8% CPU</b> —— 算力根本不是瓶颈，
+             * 丢掉的帧全是节流误杀的。
+             *
+             * <h3>令牌桶为什么对</h3>
+             * 每秒补充 {@code fps} 个令牌，桶容量 2：
+             * <ul>
+             *   <li>帧到得正好（250ms）时余额恒 ≥ 1，<b>全部通过</b></li>
+             *   <li>帧到得比目标快（如 25fps）时，长期平均仍被锁在 fps</li>
+             *   <li>短暂突发（ffmpeg 重启吐多帧）最多补推 2 帧，不会雪崩</li>
+             * </ul>
+             * 关键在于它限制的是<b>长期平均速率</b>，而不是每一帧的间隔 ——
+             * 后者在抖动下无法区分「抖动」和「真的太快」。
              */
             long now = System.currentTimeMillis();
             long last = lane.lastInferMs.get();
-            long minGap = (long) (config.minIntervalMs() * THROTTLE_TOLERANCE);
-            if (now - last < minGap) {
+            long elapsedMs = last <= 0 ? 0 : Math.max(0, now - last);
+            // 补充令牌：按流逝时间线性补，上限 = 桶容量
+            double rate = config.fps() > 0 ? config.fps() : 1.0;
+            lane.tokens = Math.min(TOKEN_BUCKET_CAPACITY,
+                    lane.tokens + elapsedMs * rate / 1000.0);
+            if (lane.tokens < 1.0) {
                 droppedFrames.incrementAndGet();
+                throttleDropped.incrementAndGet();
+                /*
+                 * 不能更新 lastInferMs：令牌是按「距上次推理」补的，
+                 * 这里更新会让被丢掉的这段时间白白清零，又退回少算。
+                 */
                 continue;
             }
+            lane.tokens -= 1.0;
             lane.lastInferMs.set(now);
 
             List<Detection> detections;
@@ -223,6 +280,16 @@ public final class VisionPipeline implements AutoCloseable {
     /** 累计丢帧数（背压 + 节流）。 */
     public long droppedFrames() {
         return droppedFrames.get();
+    }
+
+    /** 其中因背压（排空积压）丢掉的帧数。 */
+    public long backpressureDropped() {
+        return backpressureDropped.get();
+    }
+
+    /** 其中因节流（未到目标间隔）丢掉的帧数。 */
+    public long throttleDropped() {
+        return throttleDropped.get();
     }
 
     /** 累计推理帧数。 */

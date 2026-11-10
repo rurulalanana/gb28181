@@ -155,6 +155,47 @@ public class Gb28181MediaService implements SipCallback {
     private volatile DeviceListener deviceListener;
 
     /**
+     * 「这个通道的流还有没有别的人在用」的判定钩子（可选）。
+     *
+     * <h3>为什么必须有这个钩子（真实故障）</h3>
+     * ZLM 的无人观看回调只看<b>它自己的读者数</b>。而视觉检测是 Java 侧起
+     * ffmpeg 拉 HTTP-TS 流，那条连接<b>不算 ZLM 的读者</b> —— 于是检测刚开起来
+     * 好好的，20 秒（{@code general.streamNoneReaderDelayMS}）后被当成
+     * 「无人观看」发 BYE 关掉，表现为检测「卡住」。
+     *
+     * <p>实测证据（2026-11-10 19:08:57）：
+     * <pre>
+     *   19:08:39  视觉检测已 69 秒没有新帧，判定为卡住: channel=10001/10001-1
+     *   19:08:57  无人观看超时，关闭会话: RtpSession{key=3402.../4301...}
+     * </pre>
+     * 被关的通道当时<b>正在检测中</b>。
+     *
+     * <p>注意这与 {@code StreamService.reapIdleStreams} 是<b>两条独立路径</b>：
+     * 后者已经通过 {@code channelsRequiringStream()} 保护了视觉通道，
+     * 但 ZLM 原生回调不经过它 —— 只修一边不够。
+     *
+     * <p>放在 sip-zlm 模块里用 SPI 而不是直接依赖 Spring：
+     * 本模块<b>零 Spring 依赖</b>，不能反向依赖 starter。
+     */
+    public interface StreamConsumerChecker {
+        /**
+         * 该通道的流是否仍被需要（除 ZLM 读者以外的用途，如视觉检测）。
+         *
+         * @param deviceId  设备编码
+         * @param channelId 通道编码
+         * @return {@code true} 表示「还有人在用，不要关」
+         */
+        boolean stillNeeded(String deviceId, String channelId);
+    }
+
+    private volatile StreamConsumerChecker streamConsumerChecker;
+
+    /** 挂载「流是否仍被需要」的判定钩子；传 {@code null} 取消。 */
+    public void setStreamConsumerChecker(StreamConsumerChecker checker) {
+        this.streamConsumerChecker = checker;
+    }
+
+    /**
      * 信令回调委派对象（可选）。
      *
      * <p>本服务是 {@link Gb28181SipServer} 唯一的回调接收者，集成方（如 Web 平台）
@@ -777,6 +818,26 @@ public class Gb28181MediaService implements SipCallback {
             // 首次关闭后剩余几次查不到会话属正常，降级为 debug 避免刷屏
             log.debug("无人观看，但未找到对应会话（可能已关闭）: app={} stream={}", app, stream);
             return false;
+        }
+        /*
+         * 先问「还有没有别的人在用」。
+         *
+         * ZLM 只数它自己的读者，而视觉检测的 ffmpeg 拉流不算读者 ——
+         * 不拦这一下的话，正在检测的流会在 20 秒后被当无人观看关掉，
+         * 表现为检测「卡住」（实测就是这个问题）。
+         */
+        StreamConsumerChecker checker = streamConsumerChecker;
+        if (checker != null) {
+            try {
+                if (checker.stillNeeded(session.getDeviceId(), session.getChannelId())) {
+                    log.debug("无人观看但流仍被需要（视觉检测等），跳过关流: {}", session.getSessionKey());
+                    return false;
+                }
+            } catch (RuntimeException e) {
+                // 判定失败时按「不需要」处理：宁可多关一次让业务侧重开，
+                // 也不要因为钩子异常把所有流永久钉住
+                log.warn("流用途判定异常，按无人观看处理: {} {}", session.getSessionKey(), e.getMessage());
+            }
         }
         log.info("无人观看超时，关闭会话: {}", session);
         // 记冷却再关流：设备不认 BYE（实测 LiveGBS）会继续推流，

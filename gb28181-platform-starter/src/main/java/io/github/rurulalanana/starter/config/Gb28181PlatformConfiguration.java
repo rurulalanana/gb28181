@@ -28,7 +28,8 @@ public class Gb28181PlatformConfiguration {
     public Gb28181MediaPlatform gb28181MediaPlatform(Gb28181Properties props,
                                                      ObjectProvider<RuntimeConfigService> configProvider,
                                                      ObjectProvider<AccessControlService> aclProvider,
-                                                     ObjectProvider<CascadeParentRegistry> cascadeParentProvider) {
+                                                     ObjectProvider<CascadeParentRegistry> cascadeParentProvider,
+                                                     ObjectProvider<io.github.rurulalanana.starter.service.vision.VisionService> visionProvider) {
         MediaServerProperties.MediaServerPropertiesBuilder builder = MediaServerProperties.builder()
                 .platformId(props.getPlatformId())
                 .sipHost(props.getSipHost())
@@ -76,6 +77,33 @@ public class Gb28181PlatformConfiguration {
 
         Gb28181MediaPlatform platform = new Gb28181MediaPlatform(mediaProps);
         platform.start();
+        /*
+         * 把视觉检测接入「无人观看」判定。
+         *
+         * <h3>不接这一下的后果（实测故障）</h3>
+         * ZLM 只数它自己的读者，而视觉取帧是 Java 侧起 ffmpeg 拉 HTTP-TS，
+         * <b>不算 ZLM 读者</b>。于是正在检测的流会在
+         * {@code general.streamNoneReaderDelayMS}（20 秒）后被 ZLM 判为
+         * 「无人观看」→ 回调 {@code onNoViewer} → 发 BYE 关掉 → 检测卡住。
+         *
+         * <p>实测日志（2026-11-10 19:08）：
+         * <pre>
+         *   19:08:39  视觉检测已 69 秒没有新帧，判定为卡住: channel=10001/10001-1
+         *   19:08:57  无人观看超时，关闭会话: RtpSession{key=3402.../4301...}
+         * </pre>
+         * 被关的通道当时正在检测中，且这条路径<b>不经过</b>
+         * {@code StreamService.reapIdleStreams}（那条路径已经保护了），
+         * 所以只修一边不够。
+         *
+         * <p>用 {@code ObjectProvider} 延迟解析：视觉模块可能未启用
+         * （{@code vision.enabled=false}），且本 bean 构造得很早，
+         * 直接注入会提前初始化它依赖的一堆东西。
+         */
+        platform.mediaService().setStreamConsumerChecker((deviceId, channelId) -> {
+            io.github.rurulalanana.starter.service.vision.VisionService vision =
+                    visionProvider.getIfAvailable();
+            return vision != null && vision.isRunningChannel(channelId);
+        });
         log.info("GB28181 平台已启动：SIP {}:{} / 媒体 http={} rtmp={} rtsp={} rtc={} / RTP收流={}",
                 props.getSipHost(), props.getSipPort(),
                 platform.mediaServer().getHttpPort(), platform.mediaServer().getRtmpPort(),

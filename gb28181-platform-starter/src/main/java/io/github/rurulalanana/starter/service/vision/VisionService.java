@@ -59,22 +59,50 @@ public class VisionService {
     private final java.util.Set<String> stallWarned = ConcurrentHashMap.newKeySet();
 
     /**
-     * 多久没产出推理帧就告警（毫秒）。
+     * 多久没新帧就判定「卡住」并主动重启这一路（毫秒）。
      *
-     * <p>正常通道：ffmpeg 启动 + 拉流 + 等关键帧 + 首次推理不超过 10 秒。
-     * 给 120 秒是为了容忍慢设备（级联下级实测有 45 秒才推第一个包的）。
+     * <h3>为什么需要主动重启（真实故障）</h3>
+     * 实测踩过：某一路检测「卡住」了一小时 —— ffmpeg 进程还在、
+     * {@code runningCount} 正确、{@code inferredFrames} 是个大正数，
+     * 界面上 {@code healthy=true}，但画面里的框早就不动了。
+     * 那一小时里 {@code gb_alarm} 一条记录都没有（正常时几分钟一条）。
+     *
+     * <p>根因是两处判断都用了<b>累计值</b>：
+     * <ul>
+     *   <li>{@code healthy} 判 {@code inferredFrames > 0} —— 出过一帧就永远健康</li>
+     *   <li>{@code warnIfStalled} 同样只看 {@code inferredFrames > 0}</li>
+     * </ul>
+     * 累计值只能回答「历史上有没有出过帧」，回答不了「现在还在不在出帧」。
+     * 所以「卡住」这个失效方式<b>完全静默</b>，没有任何告警。
+     *
+     * <p>阈值取 45 秒：比已知的最长上游突发停顿（实测 3.85 秒）大一个量级，
+     * 不会误判；而 45 秒不出帧对监控场景已经是「必须自愈」的量级。
      */
-    private static final long STALL_WARN_AFTER_MS = 120_000;
+    private static final long RESTART_AFTER_SILENT_MS = 45_000;
     /** 一路检测的运行态。 */
     private static final class Running {
         final VisionPipeline pipeline;
         final AutoCloseable detach;
         final String modelId;
+        /**
+         * 取帧源：用来判「现在还在不在出帧」。
+         *
+         * <p>不能只靠 {@code pipeline.inferredFrames()}（累计值）：
+         * 卡了一小时它照样是个大正数，看不出任何异常。
+         */
+        final ZlmFrameSource source;
 
-        Running(VisionPipeline pipeline, AutoCloseable detach, String modelId) {
+        Running(VisionPipeline pipeline, AutoCloseable detach, String modelId,
+                ZlmFrameSource source) {
             this.pipeline = pipeline;
             this.detach = detach;
             this.modelId = modelId;
+            this.source = source;
+        }
+
+        /** 距上一帧过去了多久（毫秒）；取不到时返回 0（当作健康）。 */
+        long silentMillis() {
+            return source == null ? 0 : source.silentMillis();
         }
     }
 
@@ -181,35 +209,66 @@ public class VisionService {
     }
 
     /**
-     * 报「已 attach 但从未产出推理帧」的通道。
+     * 检查「卡住」的通道，并主动重启这一路。
      *
-     * <h3>为什么需要这个检查</h3>
-     * 这个失效方式<b>完全静默</b>：ffmpeg 进程在跑、attach 成功、
-     * {@code runningCount} 正确，唯独 {@code inferredFrames} 永远是 0。
-     * 不看这个指标会以为「检测正常工作」。
+     * <h3>这个检查要抓的是哪种失效</h3>
+     * 两种完全不同的失效，早先被混成了一个判断：
+     * <ol>
+     *   <li><b>从未出帧</b>：ffmpeg 起来了但一帧没出（编码不支持、TS 不可达）。
+     *       {@code inferredFrames == 0}，能被累计值判断抓到。</li>
+     *   <li><b>出过帧后卡住</b>：跑了很久突然不再出帧（ffmpeg 退出、
+     *       上游断流、管道阻塞）。{@code inferredFrames} 是个大正数，
+     *       <b>累计值判断完全看不出来</b> —— 这就是实测那次「卡了一小时」。</li>
+     * </ol>
      *
-     * <p>给 120 秒宽限：ffmpeg 启动 + 拉流 + 等关键帧 + 首次推理
-     * 在正常通道上不超过 10 秒，120 秒还没帧就是真有问题。
+     * <p>早先的实现只判 {@code inferredFrames() > 0}，所以第 2 种情况
+     * 永远判成健康，日志里一条 WARN 都没有。
      *
-     * <p>每条通道只告警一次（{@link #stallWarned}），避免每 30 秒刷屏。
+     * <p>现在两种都按「距最后一帧多久」统一判断，并<b>主动重启</b>：
+     * 视觉识别是无人值守的，发现了却只记日志，等于还是卡着。
+     *
+     * <p>重启用「先 stop 再 start」而不是原地重连：ffmpeg 进程可能已经
+     * 处于异常状态（僵死、stdout 被阻塞），只重启拉流线程修不好。
      */
     private void warnIfStalled() {
-        long now = System.currentTimeMillis();
         for (Map.Entry<String, Running> e : running.entrySet()) {
             String channel = e.getKey();
-            if (e.getValue().pipeline.inferredFrames() > 0) {
+            Running r = e.getValue();
+            long silent = r.silentMillis();
+            /*
+             * 阈值只有一个：RESTART_AFTER_SILENT_MS。
+             *
+             * 早先这里写成两段（120 秒告警 / 45 秒重启），结果 45~120 秒之间
+             * 的停滞既不算「该重启」也不算「该清标记」—— 状态机卡在中间。
+             * 只有一个阈值就不会有这种空洞。
+             */
+            if (silent <= RESTART_AFTER_SILENT_MS) {
+                // 还在出帧，清掉告警标记（下次卡住能再报一次）
                 stallWarned.remove(channel);
                 continue;
             }
-            Long since = startedAt.get(channel);
-            if (since == null || now - since < STALL_WARN_AFTER_MS) {
-                continue;
-            }
+            /*
+             * 超过阈值没新帧 = 卡住。先告警（每条通道只报一次，避免刷屏），
+             * 然后重启这一路。
+             */
             if (stallWarned.add(channel)) {
-                log.warn("视觉检测已 attach 但 {} 秒内没有产出任何推理帧: channel={} —— "
-                                + "请检查 ① TS 地址是否可达（日志里搜 ffmpeg[）② 设备是否在推流 "
-                                + "③ 流是否为 H.265 以外的异常编码。用 GET /api/v1/vision/status 看 inferredFrames。",
-                        STALL_WARN_AFTER_MS / 1000, channel);
+                log.warn("视觉检测已 {} 秒没有新帧，判定为卡住: channel={} "
+                                + "累计推理={} 累计出帧={} —— 自动重启这一路",
+                        silent / 1000, channel,
+                        r.pipeline.inferredFrames(),
+                        r.source == null ? -1 : r.source.producedFrames());
+            }
+            try {
+                stop(channel);
+                // 立刻重开；失败也不要紧，retryPending() 30 秒内会再试
+                if (start(channel)) {
+                    log.info("视觉检测已自愈重启: channel={}", channel);
+                    stallWarned.remove(channel);
+                } else {
+                    log.warn("视觉检测自愈重启失败，交给 retryPending 重试: channel={}", channel);
+                }
+            } catch (RuntimeException ex) {
+                log.warn("视觉检测自愈重启异常: channel={} {}", channel, ex.getMessage());
             }
         }
     }
@@ -274,7 +333,7 @@ public class VisionService {
                 pipelineConfig(scenarioLabels), sink, new Roi(List.of()));
         ZlmFrameSource source = new ZlmFrameSource(channelKey, tsUrl, props.getFps());
         AutoCloseable detach = pipeline.attach(source);
-        running.put(channelKey, new Running(pipeline, detach, modelId));
+        running.put(channelKey, new Running(pipeline, detach, modelId, source));
         startedAt.put(channelKey, System.currentTimeMillis());
         stallWarned.remove(channelKey);
         log.info("视觉检测已开启: channel={} model={} scenario={} labels={} url={}",
@@ -349,24 +408,40 @@ public class VisionService {
             row.put("model", e.getValue().modelId);
             row.put("inferredFrames", e.getValue().pipeline.inferredFrames());
             row.put("droppedFrames", e.getValue().pipeline.droppedFrames());
+            /*
+             * 两类丢帧分开暴露：合并成一个数字时判断不出问题出在哪。
+             * 背压丢帧多 = 推理追不上（或队列太小），是健康的；
+             * 节流丢帧多 = 上游出帧比 fps 快，是配置意图。
+             */
+            row.put("backpressureDropped", e.getValue().pipeline.backpressureDropped());
+            row.put("throttleDropped", e.getValue().pipeline.throttleDropped());
             DbDetectionSink.Latest latest = sink.latestOf(e.getKey());
             row.put("lastFrameAt", latest == null ? 0 : latest.at());
             row.put("detections", latest == null ? 0 : latest.detections().size());
             row.put("counts", latest == null ? Map.of() : latest.counts());
             /*
-             * 健康判定：只报「在跑」是不够的。
+             * 健康判定：只看累计帧数是错的（踩过）。
              *
-             * 实测踩过的坑：ffmpeg 进程起来了、attach 成功了、runningCount=1，
-             * 但一帧都不出 —— 从「在跑」这个字段完全看不出来。
-             * 所以显式给出 healthy 与原因，让运维一眼看到问题。
+             * <p>实测故障：某一路卡了一小时，ffmpeg 进程在、attach 成功、
+             * {@code inferredFrames} 是个大正数 —— 按累计值判就永远是 healthy=true，
+             * 而画面里的框早就不动了。那一小时 {@code gb_alarm} 一条都没增加。
+             *
+             * <p>所以改成判「距最后一帧多久」：超过 {@link #RESTART_AFTER_SILENT_MS}
+             * 就是不健康。这样卡住能被界面看到，而不是靠人盯画面。
              */
-            long inferred = e.getValue().pipeline.inferredFrames();
-            row.put("healthy", inferred > 0);
-            if (inferred == 0) {
-                row.put("hint", "已 attach 但从未产出推理帧。排查顺序："
+            long silent = e.getValue().silentMillis();
+            boolean healthy = e.getValue().pipeline.inferredFrames() > 0
+                    && silent <= RESTART_AFTER_SILENT_MS;
+            row.put("healthy", healthy);
+            row.put("silentMs", silent);
+            if (!healthy) {
+                row.put("hint", e.getValue().pipeline.inferredFrames() == 0
+                        ? "已 attach 但从未产出推理帧。排查顺序："
                         + "① 日志里搜 'ffmpeg[' 看 ffmpeg 报什么；"
                         + "② TS 地址是否可达（curl 一下 /<app>/<stream>.live.ts）；"
-                        + "③ 设备是否在推流。");
+                        + "③ 设备是否在推流。"
+                        : "已 " + silent / 1000 + " 秒没有新帧（卡住）。"
+                        + "系统会每 30 秒检查并自动重启这一路；持续反复请查设备推流与网络。");
             }
             list.add(row);
         }
@@ -425,6 +500,8 @@ public class VisionService {
             item.put("model", r == null ? null : r.modelId);
             item.put("inferredFrames", r == null ? 0 : r.pipeline.inferredFrames());
             item.put("droppedFrames", r == null ? 0 : r.pipeline.droppedFrames());
+            item.put("backpressureDropped", r == null ? 0 : r.pipeline.backpressureDropped());
+            item.put("throttleDropped", r == null ? 0 : r.pipeline.throttleDropped());
             DbDetectionSink.Latest latest = key == null ? null : sink.latestOf(key);
             item.put("lastFrameAt", latest == null ? 0 : latest.at());
             item.put("counts", latest == null ? Map.of() : latest.counts());
@@ -432,11 +509,19 @@ public class VisionService {
              * healthy 只对「在跑」的通道有意义。
              * 没在跑时给 false 而不是 null：前端少一个分支，
              * 且「配置了但没跑起来」本来就该显示成不健康。
+             *
+             * <p>与 {@link #status()} 同口径：判「现在还在不在出帧」，
+             * 不是「历史上有没有出过帧」—— 后者卡住了也永远是 true。
              */
-            boolean inferred = r != null && r.pipeline.inferredFrames() > 0;
-            item.put("healthy", inferred);
-            if (r != null && !inferred) {
-                item.put("hint", "已启动但还没有产出推理帧，请确认设备在线且在推流");
+            long silent = r == null ? Long.MAX_VALUE : r.silentMillis();
+            boolean healthy = r != null && r.pipeline.inferredFrames() > 0
+                    && silent <= RESTART_AFTER_SILENT_MS;
+            item.put("healthy", healthy);
+            item.put("silentMs", r == null ? 0 : silent);
+            if (r != null && !healthy) {
+                item.put("hint", r.pipeline.inferredFrames() == 0
+                        ? "已启动但还没有产出推理帧，请确认设备在线且在推流"
+                        : "已 " + silent / 1000 + " 秒没有新帧（卡住），系统会自动重启这一路");
             }
             out.add(item);
         }
@@ -576,6 +661,24 @@ public class VisionService {
             out.add(slash < 0 ? key : key.substring(slash + 1));
         }
         return out;
+    }
+
+    /**
+     * 某个<b>通道编码</b>是否正在检测（不带设备编码）。
+     *
+     * <p>给 {@code Gb28181MediaService.onNoViewer} 用：ZLM 的无人观看回调只看
+     * 它自己的读者数，而视觉取帧的 ffmpeg 拉流不算读者，于是正在检测的流会被
+     * 当「无人观看」发 BYE 关掉，表现为检测「卡住」。
+     *
+     * <p>这里只按通道编码匹配（不带设备编码）：ZLM 回调给的是 app/stream
+     * 解析出的会话，而 {@code running} 的键可能是 {@code 设备/通道} 也可能是
+     * 裸 {@code 通道}（SDK 直连设备没有国标设备编码）。两种都要能命中。
+     */
+    public boolean isRunningChannel(String channelId) {
+        if (channelId == null || channelId.isBlank()) {
+            return false;
+        }
+        return runningChannelIds().contains(channelId);
     }
 
     @PreDestroy
