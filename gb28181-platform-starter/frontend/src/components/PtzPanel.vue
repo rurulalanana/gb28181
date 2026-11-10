@@ -15,18 +15,22 @@
       </el-button>
 
       <!--
-        中心键 = 语音喊话开关。
+        中心键 = 语音对讲开关。
         原先喊话单独占一个 Tab，340px 侧栏里四个 Tab 挤满一行；挪到方向盘正中
         不占额外高度，开启时按钮转红即可表达状态。
+
+        国标与大华共用这一个按钮（分流见 toggleTalk）：对用户是同一个动作，
+        对实现是两条通路 —— 分成两个按钮只会让人不知道该按哪个。
       -->
       <el-button
         :style="{ gridArea: 'c' }"
         class="ptz-btn ptz-talk"
         :class="{ 'is-talking': talking }"
         :type="talking ? 'danger' : 'default'"
+        :loading="isSdkDevice && talk.starting"
         :disabled="noTalk"
-        :title="talking ? '停止喊话' : tip('TALK', '开始喊话')"
-        :aria-label="talking ? '停止喊话' : '开始喊话'"
+        :title="talkTip"
+        :aria-label="talkTip"
         @click="toggleTalk"
       >
         <el-icon :size="18" aria-hidden="true"><Microphone /></el-icon>
@@ -252,51 +256,6 @@
           </el-button>
         </div>
 
-        <!--
-          对讲（仅 SDK 直连设备）。
-          为什么不做成方向盘中心那个按钮：那个走的是国标 /control/talk（SIP 信令，靠设备
-          自己回传音频），而大华直连设备的对讲是 NetSDK 的 StartTalkEx + 浏览器采集，
-          两套完全不同的通路。放在「设备」页底部，与相机/云台扩展保持同一套 cam-* 版式。
-        -->
-        <div v-if="isSdkDevice" class="cam-config talk-group">
-          <div class="cam-row">
-            <label class="cam-label">对讲</label>
-            <div class="cam-control">
-              <el-button
-                size="small"
-                :type="talk.active ? 'danger' : 'primary'"
-                :loading="talk.starting"
-                :disabled="noDevice || talk.busy"
-                @click="toggleDahuaTalk"
-              >
-                <el-icon><Microphone /></el-icon>
-                {{ talk.active ? '结束对讲' : '开始对讲' }}
-              </el-button>
-              <span class="cam-value">{{ talkHint }}</span>
-            </div>
-          </div>
-          <div class="cam-row">
-            <label class="cam-label">收听设备</label>
-            <div class="cam-control">
-              <el-switch
-                v-model="talk.listen"
-                :disabled="!talk.active"
-                @change="onListenToggle"
-              />
-              <span class="cam-value">{{ listenHint }}</span>
-            </div>
-          </div>
-          <div class="cam-row">
-            <label class="cam-label">麦克风</label>
-            <div class="cam-control">
-              <el-switch v-model="talk.mic" :disabled="!talk.active" @change="onMicToggle" />
-              <span class="cam-value">{{ talk.mic ? '按住说话不用按，持续采集中' : '已静音（只听）' }}</span>
-            </div>
-          </div>
-          <p class="talk-note">
-            对讲为 8 kHz 单声道，音质低于普通通话属正常；同一台设备同时只能一人喊话。
-          </p>
-        </div>
       </el-tab-pane>
 
       <!-- 相机参数：SDK 直连设备专属能力，国标设备不渲染此 tab -->
@@ -1252,7 +1211,6 @@ const cap = useDeviceCapabilities(() => props.serial)
  */
 const noPtz = computed(() => cap.disabled('PTZ', inactive.value))
 const noFi = computed(() => cap.disabled('FOCUS_IRIS', inactive.value))
-const noTalk = computed(() => cap.disabled('TALK', inactive.value))
 const noPresetBtn = computed(() => cap.disabled('PRESET', noPreset.value))
 const noAux = computed(() => cap.disabled('AUX_SWITCH', noDevice.value))
 const noRecording = computed(() => cap.disabled('RECORDING', noDevice.value))
@@ -1268,7 +1226,8 @@ const tip = cap.tip
 /** 云台速度（0~255）。固定值不提供调节：速度是调试参数，接口仍做 0~255 夹取。 */
 const SPEED = 129
 
-const talking = ref(false)
+/** 国标喊话（SIP Broadcast）是否在进行中。SDK 设备的对讲状态见 {@link talk}。 */
+const gbTalking = ref(false)
 
 /**
  * 设备侧预置位列表（只含设备上真实存在的）。数据结构见 PresetListVo：
@@ -3298,20 +3257,34 @@ async function send(action, extra = {}, okMsg = '指令已下发', silent = fals
   }
 }
 
+/**
+ * 方向盘中心键：开始/停止喊话。
+ *
+ * <p>同一个按钮，两条完全不同的通路 —— 对用户不区分，对实现必须分开：
+ * <ul>
+ *   <li><b>国标设备</b>：{@code /control/talk} 发 SIP Broadcast，音频由设备自己回传，平台不碰音频；</li>
+ *   <li><b>SDK 直连设备（大华）</b>：NetSDK {@code StartTalkEx} 建通道，浏览器采集麦克风、
+ *       同时收设备回传的音频播放（见 {@link startDahuaTalk}）。</li>
+ * </ul>
+ */
 async function toggleTalk() {
   if (!props.serial) {
     ElMessage.warning('请先选择通道')
     return
   }
-  if (talking.value) {
+  if (isSdkDevice.value) {
+    await toggleDahuaTalk()
+    return
+  }
+  if (gbTalking.value) {
     await controlApi.talk({ serial: props.serial, code: props.code })
-    talking.value = false
+    gbTalking.value = false
     ElMessage.success('已停止喊话')
     return
   }
   try {
     await controlApi.talk({ serial: props.serial, code: props.code })
-    talking.value = true
+    gbTalking.value = true
     ElMessage.success('已开始喊话')
   } catch (e) {
     ElMessage.error(e.message || '喊话启动失败')
@@ -3334,22 +3307,41 @@ const talk = reactive({
   talkId: '',
   busy: false,
   busyOwner: '',
-  listen: true,
-  mic: true,
   /** 已收到的下行帧数：用来区分「设备支持双工」和「压根没回传音频」。 */
   downFrames: 0
 })
 
-const talkHint = computed(() => {
-  if (talk.starting) return '正在建立通道…'
-  if (talk.active) return talk.downFrames > 0 ? '对讲中（双向）' : '对讲中…'
-  if (talk.busy) return `${talk.busyOwner || '他人'} 正在喊话`
-  return '未开始'
+/**
+ * 方向盘中心键的状态。
+ *
+ * <p>国标与大华是两条通路（见下面 toggleTalk / startDahuaTalk 的注释），
+ * 但对用户就是「一个麦克风按钮」，所以状态在这里合成，按钮不区分设备类型。
+ */
+const talking = computed(() => (isSdkDevice.value ? talk.active : gbTalking.value))
+
+/**
+ * 中心键的禁用条件。
+ *
+ * <p>SDK 设备<b>不看能力表</b>：能力表里 TALK 标的是「国标 Broadcast 不可用」，
+ * 而这个按钮在 SDK 设备上走的是 NetSDK 对讲，与国标无关。
+ * 真正的互斥由服务端管（同一台设备同时只能一人喊话），这里只禁「正在建立」和「别人在喊」。
+ */
+const noTalk = computed(() => {
+  if (isSdkDevice.value) {
+    return !props.serial || talk.starting || talk.busy
+  }
+  return cap.disabled('TALK', inactive.value)
 })
-const listenHint = computed(() => {
-  if (!talk.active) return '未连接'
-  if (!talk.listen) return '已关闭'
-  return talk.downFrames > 0 ? `已接收 ${talk.downFrames} 帧` : '等待设备音频…'
+
+/** 中心键的悬停提示。 */
+const talkTip = computed(() => {
+  if (isSdkDevice.value) {
+    if (!props.serial) return '请先选择通道'
+    if (talk.starting) return '正在建立通道…'
+    if (talk.busy) return `${talk.busyOwner || '他人'} 正在喊话`
+    return talk.active ? '停止对讲' : '开始对讲'
+  }
+  return talking.value ? '停止喊话' : tip('TALK', '开始喊话')
 })
 
 /** 播放/采集共用的 AudioContext（懒建，浏览器要求用户手势后才能 resume）。 */
@@ -3366,6 +3358,9 @@ let sendChain = Promise.resolve()
 /** 下行播放排期（AudioContext 时间轴），保证连续不叠音。 */
 let playCursor = 0
 let talkBusyTimer = null
+
+/** 对讲目标采样率（服务端口径：8 kHz 单声道 PCM16）。 */
+const TALK_SAMPLE_RATE = 8000
 
 /** 一帧上行字节数：200 ms @ 8 kHz/16 bit 单声道。 */
 const TALK_CHUNK_BYTES = 3200
@@ -3399,14 +3394,24 @@ async function startDahuaTalk() {
   if (talk.starting) return
   talk.starting = true
   try {
+    /*
+     * 先要麦克风，再占设备通道。
+     *
+     * 顺序不能反：大华同一时刻只允许一路对讲，如果先 start 再取麦克风，
+     * 一旦用户在浏览器里点了「禁止」或者页面不是安全上下文，设备通道就被
+     * 白占一次 —— 用户看到的是「对讲没开始」，而设备侧显示「有人在讲话」。
+     */
+    await openTalkAudio()
     const s = await dahuaApi.talkStart({ serial: props.serial })
     talk.talkId = s.talkId
     talk.active = true
     talk.downFrames = 0
-    talk.listen = true
-    talk.mic = true
-    await startMic(s.sampleRate || 8000)
+    attachMic(s.sampleRate || TALK_SAMPLE_RATE)
     connectTalkWs(s.wsUrl)
+    if (s.sampleRate && s.sampleRate !== TALK_SAMPLE_RATE) {
+      // 服务端口径变了：客户端重采样目标跟着它走，否则音调会不对
+      console.warn('对讲采样率与客户端假设不一致', s.sampleRate)
+    }
     ElMessage.success('已开始对讲')
   } catch (e) {
     // 失败要清干净：否则设备通道被占着，用户再点会被自己挡住
@@ -3448,28 +3453,65 @@ async function stopDahuaTalk(notify) {
   refreshTalkBusy()
 }
 
-/** 开麦采集：getUserMedia → 重采样到 8 kHz → 攒块 → POST。 */
-async function startMic(sampleRate) {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error('浏览器不支持录音（需要 https 或 localhost）')
+/**
+ * 打开麦克风与播放用的 AudioContext。
+ *
+ * <h3>为什么错误信息要按原因分开写</h3>
+ * 对讲失败时用户能做的动作完全取决于原因，而浏览器的原始报错全是英文：
+ * <ul>
+ *   <li>{@code undefined}（{@code navigator.mediaDevices} 都没有）→ 页面不是安全上下文，
+ *       必须换 HTTPS 打开 —— 这不是「浏览器不支持」，说成不支持会让人换浏览器白折腾；</li>
+ *   <li>{@code NotAllowedError} → 用户点了拒绝，或者被 Permissions-Policy 禁掉了；</li>
+ *   <li>{@code NotFoundError} → 这台机器根本没有麦克风。</li>
+ * </ul>
+ */
+async function openTalkAudio() {
+  if (!window.isSecureContext) {
+    throw new Error(
+      `对讲需要 HTTPS：当前页面是 ${window.location.protocol}//${window.location.host}，` +
+        '浏览器只在 HTTPS 或 localhost 下允许录音。' +
+        `请改用 https://${window.location.hostname}:48087 打开平台（首次需接受自签证书）`
+    )
   }
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('当前浏览器不支持网页录音，请换用 Chrome / Edge')
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    })
+  } catch (e) {
+    if (e?.name === 'NotAllowedError') {
+      throw new Error('麦克风权限被拒绝：请点地址栏左侧的图标，把麦克风改成「允许」后重试')
     }
-  })
+    if (e?.name === 'NotFoundError') {
+      throw new Error('没有找到麦克风设备')
+    }
+    throw new Error(e?.message || '打开麦克风失败')
+  }
   talkCtx = new AudioContext()
   // 浏览器可能把 AudioContext 起成 suspended（需用户手势），这里显式恢复
   if (talkCtx.state === 'suspended') {
     await talkCtx.resume()
   }
+}
+
+/**
+ * 把麦克风接进采集链：重采样到 8 kHz → 攒块 → POST。
+ *
+ * @param {number} sampleRate 目标采样率（服务端口径，8 kHz）
+ */
+function attachMic(sampleRate) {
+  if (!talkCtx || !micStream) return
   micSource = talkCtx.createMediaStreamSource(micStream)
   micProcessor = talkCtx.createScriptProcessor(4096, 1, 1)
   micProcessor.onaudioprocess = (ev) => {
-    if (!talk.active || !talk.mic) return
+    if (!talk.active) return
     const input = ev.inputBuffer.getChannelData(0)
     const pcm = downsampleToInt16(input, talkCtx.sampleRate, sampleRate)
     if (pcm.length) {
@@ -3512,13 +3554,6 @@ function stopMic() {
   }
 }
 
-function onMicToggle(val) {
-  if (!val) {
-    pendingSamples = []
-    pendingLength = 0
-  }
-}
-
 function flushMic() {
   if (!pendingLength || !talk.talkId) return
   const total = pendingLength
@@ -3550,7 +3585,7 @@ function connectTalkWs(wsUrl) {
   talkWs = new WebSocket(url)
   talkWs.binaryType = 'arraybuffer'
   talkWs.onmessage = (ev) => {
-    if (!talk.listen || !(ev.data instanceof ArrayBuffer)) return
+    if (!(ev.data instanceof ArrayBuffer)) return
     talk.downFrames++
     playPcm(new Int16Array(ev.data))
   }
@@ -3569,12 +3604,6 @@ function closeTalkWs() {
     /* 忽略 */
   }
   talkWs = null
-}
-
-function onListenToggle(val) {
-  if (!val) return
-  // 从「关闭」切到「开」时把播放队列归零，避免补播一大堆积压的音频
-  playCursor = 0
 }
 
 /** 把服务端返回的 wsUrl 换成当前页面的主机（nginx 反代后 Host 可能不同）。 */
@@ -3999,21 +4028,6 @@ function reportTrackResult(res, action) {
   gap: 10px;
   height: 100%;
   min-height: 0;
-}
-
-/* 对讲分组：垫在「设备」页按钮下方，用分隔线把它和上方的即时动作区分开 */
-.talk-group {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--el-border-color-light);
-  height: auto;
-}
-
-.talk-note {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--el-text-color-secondary);
 }
 
 .cam-groups {

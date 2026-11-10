@@ -476,6 +476,55 @@ PTZ速度     PtzSpeed[ch].PtzSpeed / PatternSpeed
 `DahuaExtAccess.readConfigFlat()` 把 SDK 的 JSON 转成**与 CGI 逐字符相同的键路径**
 （`PtzSpeed[0].PtzSpeed`），12 个 parse 方法零改动。
 
+## 9.8 SDK 取流的音频（音视频双轨）
+
+### 为什么要自己建音频轨
+
+SDK 取流（`CLIENT_RealPlayByDataType`）拿到的帧分两类，回调参数 `dwDataType` 区分：
+
+| `dwDataType` | 内容 | 首字节特征 |
+|---|---|---|
+| `1004` | 转封装后的**裸数据**（视频 Annex-B / 音频裸帧） | 视频 `00 00 00 01`；音频无起始码 |
+| `0` | **私有 DHAV** 帧（40 字节视频头 / 48 字节音频头） | `44 48 41 56`（`"DHAV"`），第 5 字节 `FD/FC/F0/F1` |
+
+同一帧会**成对投递**（一份 1004、一份 DHAV）。平台只用 `1004` 那份：
+它没有帧头，直接就能喂 ZLM；DHAV 那份要拆头，且与前者内容重复。
+
+判据就是「`toAnnexB()` 解不出 NAL」——这个方法本来就在用（视频走它），
+音频天然解不出 NAL，于是**不需要解析 DHAV 音频帧头**就能把两类分开。
+
+### 编码口径
+
+`mk_media_init_audio` 的 `codec_id` 传错**不会报错**，只会把声音变成噪音，
+所以编码必须是配置项而不是「猜」：
+
+```yaml
+dahua:
+  stream:
+    audio-codec: auto      # auto / g711a / g711u / aac / off
+    audio-sample-rate: 8000
+    audio-channels: 1
+```
+
+`auto` = 大华出厂默认 **G.711A / 8 kHz / 单声道**。
+实测静音帧是 `D5 55 D5 55 …` —— A-law 的 ±0 正是 `0xD5`/`0x55`
+（µ-law 是 `0xFF`/`0x7F`），这是判定编码最省事的现场证据。
+
+### `mk_media_init_complete` 的时序
+
+见 [排障实录 §17](./排障实录.md)：开了音频之后，这条不能在首帧视频就调 ——
+调了轨道集合就定死，音频轨加不进去。现在的做法是等音频最多 500 ms，
+等不到再按纯视频收尾；`DahuaSdkStreamService` 也相应改用 `publisher.ready()`
+（已收尾）而不是 `hasFirstFrame()`（推了首帧视频）判断「流可用」。
+
+### 验收
+
+```
+ZLM 音频轨道已就绪: 10001/10001-1 codec=G711A 8000Hz/1ch
+$ ffmpeg -i http://127.0.0.1:48089/10001/10001-1.live.flv -af volumedetect -vn -f null -
+  Stream #0:1: Audio: pcm_alaw, 8000 Hz, mono, s16, 64 kb/s
+```
+
 ## 10. 尚未解决
 
 - **无大华真机**：已验证「原生库从 jar 解压 → `CLIENT_Init` 成功 →
@@ -491,5 +540,7 @@ PTZ速度     PtzSpeed[ch].PtzSpeed / PatternSpeed
   `DeviceContext.connectable` 两套判据、云台方向映射、通道号反解、流地址生成。
 - ~~**SERVER 模式未接线**~~：已由 `DahuaConfiguration` 接线，
   配置项 `dahua.server-mode.enabled=true` 开启（默认关闭）。
-- **预览/回放走 RTSP 未接线**：见 §7，`liveStreamUri()` / `playbackStreamUri()`
-  已实现并验证输出格式，但尚未接入 `zlm4j` 的 proxy player 真正拉流。
+- ~~**预览/回放走 RTSP 未接线**~~：已接线。设备有 SDK 会话时走 SDK 取流，
+  没有会话时退回 ZLM 拉 RTSP（`DahuaMediaProvider#startRtspProxy`）。
+- **音频编码未自动探测**：SDK 回调里只有裸音频字节，没有编码标识，
+  靠猜会把「配错」变成随机故障，所以做成配置项（见 §9.8）。

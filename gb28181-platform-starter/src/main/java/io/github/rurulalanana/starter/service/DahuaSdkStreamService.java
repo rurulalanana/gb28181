@@ -6,6 +6,7 @@ import io.github.rurulalanana.gb28181.sip.zlm.EsMediaPublisher;
 import io.github.rurulalanana.gb28181.sip.zlm.Gb28181MediaPlatform;
 import io.github.rurulalanana.gb28181.sip.zlm.ZlmMediaServer;
 import io.github.rurulalanana.starter.common.BizException;
+import io.github.rurulalanana.starter.config.DahuaProperties;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -40,6 +41,7 @@ public class DahuaSdkStreamService {
     private final DahuaCapabilityService capability;
     private final DeviceService deviceService;
     private final Gb28181MediaPlatform platform;
+    private final DahuaProperties props;
 
     /** 一路 SDK 取流：SDK 句柄 + ZLM 发布器。 */
     public record LiveStream(String key, String app, String stream,
@@ -117,7 +119,9 @@ public class DahuaSdkStreamService {
          */
         EsMediaPublisher publisher;
         try {
-            publisher = media.createEsPublisher(deviceId, channel);
+            publisher = media.createEsPublisher(deviceId, channel,
+                    audioCodec(), props.getStream().getAudioSampleRate(),
+                    props.getStream().getAudioChannels());
         } catch (RuntimeException e) {
             throw BizException.badRequest("创建媒体源失败：" + e.getMessage());
         }
@@ -126,7 +130,8 @@ public class DahuaSdkStreamService {
         try {
             // dataType 只作诊断用（H265 也可能报 1004），编码由发布器从 NAL 头判定
             play = capability.ext().startRealPlay(session, sdkChannel, key,
-                    (es, dataType) -> publisher.push(es));
+                    (es, dataType) -> publisher.push(es),
+                    audioCodec() == 0 ? null : (audio, dataType) -> publisher.pushAudio(audio));
         } catch (RuntimeException e) {
             publisher.close();
             throw BizException.badRequest("大华 SDK 取流失败：" + e.getMessage());
@@ -135,9 +140,13 @@ public class DahuaSdkStreamService {
         /*
          * 等首帧：ZLM 在收到媒体数据前不会真正注册流，
          * 提前返回的播放地址前端打开是 404（表现为「有地址但播不了」）。
+         *
+         * 判据用 ready() 而不是 hasFirstFrame()：开了音频时发布器要把
+         * mk_media_init_complete 推迟到音频轨就绪（否则音频轨加不进去），
+         * 只推了首帧视频的那几百毫秒里 ZLM 还没注册这路流。
          */
         long deadline = System.currentTimeMillis() + FIRST_FRAME_WAIT_MS;
-        while (System.currentTimeMillis() < deadline && !publisher.hasFirstFrame()) {
+        while (System.currentTimeMillis() < deadline && !publisher.ready()) {
             try {
                 Thread.sleep(50L);
             } catch (InterruptedException ie) {
@@ -145,7 +154,7 @@ public class DahuaSdkStreamService {
                 break;
             }
         }
-        if (!publisher.hasFirstFrame()) {
+        if (!publisher.ready()) {
             // 不留死流：SDK 句柄与媒体源一起收掉，接口明确报错
             try {
                 play.close();
@@ -153,18 +162,21 @@ public class DahuaSdkStreamService {
                 // 已失败，清理异常不再向上抛
             }
             publisher.close();
+            // 区分「一帧都没有」与「有帧但轨道没收尾」：两者的排查方向完全不同
+            String why = publisher.hasFirstFrame()
+                    ? "已有视频帧但轨道未就绪（音频轨初始化异常）"
+                    : "没有拿到视频帧。请检查该通道是否真的有画面"
+                    + "（通道号：IPC 自身是 0，NVR 下挂是 1~N）";
             throw BizException.badRequest(
-                    "大华 SDK 取流超时：已登录设备但 " + FIRST_FRAME_WAIT_MS
-                            + "ms 内没有拿到视频帧。请检查该通道是否真的有画面"
-                            + "（通道号：IPC 自身是 0，NVR 下挂是 1~N）");
+                    "大华 SDK 取流超时：已登录设备但 " + FIRST_FRAME_WAIT_MS + "ms 内" + why);
         }
 
         LiveStream live = new LiveStream(key, deviceId, channel, play, publisher);
         running.put(key, live);
         lastViewerAt.remove(key);
-        log.info("大华 SDK 取流已启动: {} 通道={} codec={} 累计帧={}",
+        log.info("大华 SDK 取流已启动: {} 通道={} codec={} 视频帧={} 音频帧={}",
                 key, sdkChannel, publisher.codecName() == 0 ? "H264" : "H265",
-                publisher.frames());
+                publisher.frames(), publisher.audioFrames());
         return live;
     }
 
@@ -179,6 +191,29 @@ public class DahuaSdkStreamService {
         int index = io.github.rurulalanana.dahua.DahuaDeviceAccessProvider
                 .channelIndexOf(deviceId, channel);
         return session.ipc() ? Math.max(0, index - 1) : index;
+    }
+
+    /**
+     * 音频编码 → ZLM CodecId。
+     *
+     * <p>{@code auto} 取大华出厂默认值 G.711A。不做自动探测的理由见
+     * {@link DahuaProperties.Stream#getAudioCodec()}。
+     *
+     * @return ZLM 的音频 CodecId；{@code 0} 表示这路流不要音频轨
+     */
+    private int audioCodec() {
+        String v = props.getStream() == null ? null : props.getStream().getAudioCodec();
+        if (v == null || v.isBlank()) {
+            return EsMediaPublisher.AUDIO_G711A;
+        }
+        return switch (v.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "off", "none", "false", "0" -> 0;
+            case "g711u", "g711mu", "mulaw", "ulaw", "pcmu" -> EsMediaPublisher.AUDIO_G711U;
+            case "aac" -> EsMediaPublisher.AUDIO_AAC;
+            // g711a / auto 以及任何拼错的值：按大华出厂默认处理。
+            // 拼错时按默认走而不是报错，是因为音频是附加能力，不该拦住出图。
+            default -> EsMediaPublisher.AUDIO_G711A;
+        };
     }
 
     /** 停止一路 SDK 取流（幂等）。 */

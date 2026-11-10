@@ -1019,6 +1019,23 @@ public final class DahuaExtAccess {
         void onFrame(byte[] es, int dataType);
     }
 
+    /**
+     * SDK 取流的音频回调。
+     *
+     * <p>运行在 SDK 原生线程上，<b>必须快速返回</b>。
+     *
+     * <p>设备侧音频编码由设备配置决定（大华出厂默认 G.711A、8 kHz、单声道）。
+     * 本接口只负责<b>取到裸音频</b>，编码口径由调用方声明给 ZLM。
+     */
+    @FunctionalInterface
+    public interface AudioListener {
+        /**
+         * @param frame    单帧音频裸数据，<b>不含任何封装头</b>
+         * @param dataType SDK 上报的 {@code dwDataType}，仅供诊断
+         */
+        void onAudio(byte[] frame, int dataType);
+    }
+
     /** 一路 SDK 取流。{@code close()} 幂等。 */
     public static final class RealPlay implements AutoCloseable {
 
@@ -1059,6 +1076,20 @@ public final class DahuaExtAccess {
      * 连续 10 秒一个字节都收不到。多通道并发取流时必须靠它区分。
      */
     private static final Map<Long, StreamListener> STREAM_LISTENERS = new ConcurrentHashMap<>();
+
+    /**
+     * 音频回调：{@code 取流句柄 → 音频接收方}。
+     *
+     * <p>与 {@link #STREAM_LISTENERS} 分开索引：视频与音频是两条独立的轨道，
+     * 有的调用方只要视频（例如录像只存画面），不能强迫它实现空方法。
+     */
+    private static final Map<Long, AudioListener> AUDIO_LISTENERS = new ConcurrentHashMap<>();
+
+    /** 已经为哪个句柄打过「非视频私有帧」的取证日志（每路流一次，不刷屏）。 */
+    private static final java.util.Set<Long> PRIVATE_FRAME_PROBED = ConcurrentHashMap.newKeySet();
+
+    /** 已经为哪个句柄打过「收到音频但无人订阅」的告警（每路流一次）。 */
+    private static final java.util.Set<Long> AUDIO_PROBED = ConcurrentHashMap.newKeySet();
 
     /**
      * 前若干条数据的诊断日志条数。
@@ -1119,6 +1150,27 @@ public final class DahuaExtAccess {
                     }
                     byte[] es = toAnnexB(raw);
                     if (es == null) {
+                        /*
+                         * 不是视频。此处有两种东西：
+                         *   · dataType != 0：转封装后的**裸音频**（实测 G.711，无帧头）；
+                         *   · dataType == 0：私有 DHAV 音频/信息帧（0xF0/0xF1），带 48 字节帧头。
+                         * 只用前者：它是干净的裸数据，直接就能喂 ZLM；
+                         * 后者要拆帧头，且与前者是同一份音频的重复投递。
+                         */
+                        if (dataType != 0) {
+                            AudioListener audio = AUDIO_LISTENERS.get(id);
+                            if (audio != null) {
+                                audio.onAudio(raw, dataType);
+                            } else if (AUDIO_PROBED.add(id)) {
+                                log.info("SDK 取流收到音频帧但无人订阅（长度 {}，前 16 字节）: {}",
+                                        bufSize, hexHead(raw, 16));
+                            }
+                        } else if (PRIVATE_FRAME_PROBED.add(id)) {
+                            // 私有音频/信息帧也留一条证据：帧头里带着音频编码信息，
+                            // 换型号/换固件时靠它定位「为什么没声音」
+                            log.info("SDK 取流非视频私有帧（长度 {}，前 16 字节）: {}",
+                                    bufSize, hexHead(raw, 16));
+                        }
                         return;
                     }
                     if (dataType != 0) {
@@ -1129,6 +1181,16 @@ public final class DahuaExtAccess {
                     // 消费方异常不能抛回原生线程，否则整个 SDK 回调链会崩
                 }
             };
+
+    /** 前 {@code n} 个字节的十六进制串，用于日志取证。 */
+    private static String hexHead(byte[] d, int n) {
+        int len = Math.min(d.length, n);
+        StringBuilder sb = new StringBuilder(len * 3);
+        for (int i = 0; i < len; i++) {
+            sb.append(String.format("%02X ", d[i]));
+        }
+        return sb.toString().trim();
+    }
 
     /**
      * 把回调数据转成 Annex-B 裸流；不是视频数据时返回 {@code null}。
@@ -1230,6 +1292,20 @@ public final class DahuaExtAccess {
      */
     public RealPlay startRealPlay(DahuaSdk.Session session, int channel, String key,
                                   StreamListener listener) {
+        return startRealPlay(session, channel, key, listener, null);
+    }
+
+    /**
+     * 按 SDK 取码流，并<b>同时</b>订阅音频。
+     *
+     * <p>{@code audioListener} 非空时，同一路取流会把「转封装后的裸音频」
+     * 一并回调出去（见 {@link AudioListener}）。设备侧没接麦克风/关了音频时
+     * 只是收不到音频帧，不影响画面。
+     *
+     * @param audioListener 音频消费者；传 {@code null} 表示只要画面
+     */
+    public RealPlay startRealPlay(DahuaSdk.Session session, int channel, String key,
+                                  StreamListener listener, AudioListener audioListener) {
         NetSDKLib sdk = requireSdk();
         NetSDKLib.NET_IN_REALPLAY_BY_DATA_TYPE in = new NetSDKLib.NET_IN_REALPLAY_BY_DATA_TYPE();
         in.nChannelID = channel;
@@ -1268,14 +1344,22 @@ public final class DahuaExtAccess {
         }
         long id = handle.longValue();
         STREAM_LISTENERS.put(id, listener);
-        log.info("SDK 取流已开始: {} 通道={} handle={}", key, channel, id);
+        if (audioListener != null) {
+            AUDIO_LISTENERS.put(id, audioListener);
+        }
+        log.info("SDK 取流已开始: {} 通道={} handle={} 音频={}", key, channel, id,
+                audioListener != null ? "订阅" : "不订阅");
         return new RealPlay(this, handle, key);
     }
 
     void stopRealPlay(RealPlay play) {
-        STREAM_LISTENERS.remove(play.handle.longValue());
-        RAW_HANDLES.remove(play.handle.longValue());
-        SEEN.remove(play.handle.longValue());
+        long id = play.handle.longValue();
+        STREAM_LISTENERS.remove(id);
+        AUDIO_LISTENERS.remove(id);
+        RAW_HANDLES.remove(id);
+        SEEN.remove(id);
+        PRIVATE_FRAME_PROBED.remove(id);
+        AUDIO_PROBED.remove(id);
         try {
             requireSdk().CLIENT_StopRealPlayEx(play.handle);
             log.info("SDK 取流已停止: {}", play.key());

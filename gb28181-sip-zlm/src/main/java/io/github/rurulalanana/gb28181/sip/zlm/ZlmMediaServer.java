@@ -531,6 +531,24 @@ public class ZlmMediaServer {
     }
 
     /**
+     * 创建发布器，并<b>预留一条音频轨</b>。
+     *
+     * <p>用在「SDK 同时能给音视频裸流」的接入（大华）：音频轨要等第一帧音频到达才知道
+     * 编码是否正确，所以发布器会把 {@code mk_media_init_complete} 推迟到音频就绪
+     * 或 {@link EsMediaPublisher} 内部的宽限时间到点。
+     *
+     * @param audioCodec      音频编码，见 {@link EsMediaPublisher#AUDIO_G711A}；0 = 不要音频
+     * @param audioSampleRate 采样率（Hz），G.711 恒为 8000
+     * @param audioChannels   声道数，G.711 单声道为 1
+     */
+    public EsMediaPublisher createEsPublisher(String app, String stream,
+                                              int audioCodec, int audioSampleRate,
+                                              int audioChannels) {
+        return new EsMediaPublisher(api(), props.getVhost(), app, stream,
+                props.isEnableHls(), false, audioCodec, audioSampleRate, audioChannels);
+    }
+
+    /**
      * 为一路「设备推 PS 码流」的流创建解码器（PS → 裸 H264/H265）。
      *
      * <p>用在海康 ISUP：设备把 PS 推给平台 SMS 端口，平台不自己解 PS，

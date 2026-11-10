@@ -207,4 +207,41 @@ public class DahuaProperties {
 
     /** 抓图直传接收配置。 */
     private SnapUpload snapUpload = new SnapUpload();
+
+    /** SDK 取流（音视频）配置。 */
+    private Stream stream = new Stream();
+
+    /**
+     * SDK 取流的音频配置。
+     *
+     * <h3>为什么要配</h3>
+     * SDK 取流走 {@code mk_media_init_audio} 自建音频轨，ZLM 必须先知道
+     * <b>编码 / 采样率 / 声道数</b>才能把这路音频转成 FLV/HLS/WebRTC。
+     * 这三个值由<b>设备侧</b>的「音频编码」决定（设备 Web 界面 → 视音频 → 音频）。
+     *
+     * <p><b>配错的表现是「有声音但是噪音」</b>（把 G.711A 当 G.711U 解），
+     * 不会报错 —— 所以配错时先把 {@link #codec} 改成 {@code off}
+     * 验证「确实是编码口径问题」再逐个试。
+     *
+     * <p>大华 IPC 出厂默认是 <b>G.711A / 8 kHz / 单声道</b>，与这里一致；
+     * 现场改过设备音频编码的，必须同步改这里。
+     */
+    @Data
+    public static class Stream {
+
+        /**
+         * 音频编码：{@code auto} / {@code g711a} / {@code g711u} / {@code off}。
+         *
+         * <p>{@code auto} 取大华出厂默认值（G.711A）。
+         * 之所以不做自动探测：SDK 回调里只有裸音频字节，没有编码标识，
+         * 靠猜会把「配错」变成随机故障。宁可让人显式改一个配置项。
+         */
+        private String audioCodec = "auto";
+
+        /** 音频采样率（Hz）。G.711 恒为 8000；AAC 才可能是 16k/48k。 */
+        private int audioSampleRate = 8000;
+
+        /** 音频声道数。设备侧对讲/拾音器都是单声道。 */
+        private int audioChannels = 1;
+    }
 }
