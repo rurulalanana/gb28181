@@ -4,6 +4,7 @@ import io.github.rurulalanana.vision.Detection;
 import io.github.rurulalanana.vision.DetectionSink;
 import io.github.rurulalanana.vision.Frame;
 import io.github.rurulalanana.vision.VisionDetector;
+import io.github.rurulalanana.vision.VisionEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -134,12 +135,37 @@ public final class VisionPipeline implements AutoCloseable {
                 continue;
             }
             inferredFrames.incrementAndGet();
-            // 阈值过滤
+            /*
+             * 阈值 + 标签双重过滤。
+             *
+             * 标签过滤是「只检测人形」的实现方式：COCO 80 类里还有 car / truck /
+             * bench，不过滤的话画面里的车、椅子都会触发事件，告警中心会被淹没。
+             *
+             * 注意 config.acceptsLabel() 在 labels 为空时返回 true ——
+             * 未配置过滤就是「什么都保留」，不会静默变成「什么都检测不到」。
+             */
             List<Detection> filtered = detections.stream()
                     .filter(d -> d.above(config.confidenceThreshold()))
+                    .filter(d -> config.acceptsLabel(d.label()))
                     .toList();
-            // 事件聚合（内部再做 ROI 过滤）
-            aggregator.accept(sourceId, frame, filtered);
+            /*
+             * 先聚合出事件，再递逐帧结果。
+             *
+             * 顺序不能反：事件里的 frame 就是这一帧，业务层可能拿它去存截图；
+             * 而 onDetections 只用于实时叠框（覆盖最新一帧）。
+             *
+             * 早先这里把 aggregator.accept() 的返回值直接丢弃了 ——
+             * 去抖算了半天没人用，业务层只能按帧落库，等于去抖没生效。
+             */
+            List<VisionEvent> events = aggregator.accept(sourceId, frame, filtered);
+            for (VisionEvent event : events) {
+                try {
+                    sink.onEvent(event);
+                } catch (RuntimeException e) {
+                    log.warn("事件出口异常: source={} label={} err={}",
+                            sourceId, event.label(), e.getMessage());
+                }
+            }
             // 结果出口（业务层落库 / 推前端 / 发告警）
             try {
                 sink.onDetections(sourceId, frame, filtered);

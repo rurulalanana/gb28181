@@ -24,6 +24,10 @@ C:\Users\lixianzhao\IdeaProjects\gb28181\
 ├── device-access\                厂商无关接入契约  v2.0.0
 ├── sdk-dahua\                    大华设备接入      v2.0.0   （lib/ 走 Git LFS）
 ├── sdk-hikvision\                海康设备接入      v2.0.0   （lib/ 走 Git LFS）
+├── vision-api\                   视觉契约层        v2.0.0
+├── vision-onnx\                  视觉 ONNX 实现    v2.0.0
+├── vision-pipeline\              视觉流水线        v2.0.0
+├── models\                       视觉模型文件（独立于代码，可单独替换）
 └── gb28181-platform-starter\     平台应用          v2.0.0
 ```
 
@@ -34,6 +38,9 @@ C:\Users\lixianzhao\IdeaProjects\gb28181\
 | device-access | `device-access` | 2.0.0 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
 | sdk-dahua | `sdk-dahua` | 2.0.0 | 大华 NetSDK 接入：直连 + 主动注册 |
 | sdk-hikvision | `sdk-hikvision` | 2.0.0 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 |
+| vision-api | `vision-api` | 2.0.0 | 视觉契约层：`Frame` / `Detection` / `VisionDetector` / `DetectionSink`，零依赖 |
+| vision-onnx | `vision-onnx` | 2.0.0 | ONNX Runtime 实现：YOLOX / YOLOv8 输出解析、预处理、NMS |
+| vision-pipeline | `vision-pipeline` | 2.0.0 | 流水线：帧泵 → 推理 → 去抖聚合 → 出口（不认识具体模型/设备） |
 | starter | `gb28181-platform-starter` | 2.0.0 | Spring Boot 应用、REST、Vue 前端、业务表 |
 
 > **命名约定 `sdk-<厂商>`**：接海康就是平级的 `sdk-hikvision`，接宇视就是 `sdk-uniview`。
@@ -50,7 +57,9 @@ gb28181-platform-starter
    ├── gb28181-sip-zlm ──► gb28181-sip
    ├── gb28181-sip
    ├── sdk-dahua      ──► device-access
-   └── sdk-hikvision  ──► device-access
+   ├── sdk-hikvision  ──► device-access
+   ├── vision-pipeline ──► vision-api
+   └── vision-onnx     ──► vision-api
 ```
 
 ---

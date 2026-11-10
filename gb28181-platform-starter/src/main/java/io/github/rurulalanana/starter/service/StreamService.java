@@ -79,6 +79,22 @@ public class StreamService {
     /** 非国标设备的取流实现（SDK 裸流 / ISUP 推流 / RTSP 代理）。 */
     private final DeviceMediaRegistry mediaRegistry;
 
+    /**
+     * 视觉检测服务（可选）。
+     *
+     * <p><b>用 {@code ObjectProvider} 而不是直接注入</b>：
+     * {@code VisionService} 反过来要调本类的 {@code startLive} / {@code session}，
+     * 直接互注会造成循环依赖；且视觉模块可能未启用（{@code vision.enabled=false}），
+     * 延迟解析能在未启用时安全地拿到空值。
+     *
+     * <p><b>为什么需要它</b>：视觉检测靠 ffmpeg 拉 TS 流工作，
+     * 但那条连接不算 ZLM 的「读者」。不把正在检测的通道并进常开集合，
+     * 空闲流巡检会在 45 秒后把流当「无人观看」关掉 ——
+     * 表现为「检测刚开起来好好的，一分钟后自己停了」。
+     */
+    private final org.springframework.beans.factory.ObjectProvider<
+            io.github.rurulalanana.starter.service.vision.VisionService> visionProvider;
+
     // ==================== 点播 ====================
 
     /**
@@ -1235,6 +1251,17 @@ public class StreamService {
                 if (Boolean.FALSE.equals(ch.getOnDemand())) {
                     out.add(ch.getChannelId());
                 }
+            }
+            /*
+             * 3. 正在做视觉检测的通道。
+             * 视觉取帧是 ffmpeg 从 HTTP-TS 拉流，ZLM 不把这条连接算作读者，
+             * 所以不加这一段的话，检测流会被本巡检当成「无人观看」关掉，
+             * 表现为检测跑一会儿就静默停了（inferredFrames 不再增长）。
+             */
+            io.github.rurulalanana.starter.service.vision.VisionService vision =
+                    visionProvider.getIfAvailable();
+            if (vision != null) {
+                out.addAll(vision.runningChannelIds());
             }
             return out;
         } catch (Exception e) {

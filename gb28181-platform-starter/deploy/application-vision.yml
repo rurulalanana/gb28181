@@ -1,0 +1,67 @@
+# ============================================================================
+# AI 视觉识别 —— 服务器覆盖配置
+#
+# 【为什么单独一个文件，而不是改 jar 里的 application.yml】
+# 1) 通道编码是部署环境相关的，不该写进代码仓库的默认配置
+# 2) 改这个文件不需要重新打包 jar
+# 3) 关闭识别 = 把 enabled 改成 false 再重启，不碰 jar
+#
+# 【怎么被加载】
+# Spring Boot 不会自动读 jar 同目录的 yml，启动时必须显式指定：
+#   java -jar app.jar --spring.config.additional-location=file:./application-vision.yml
+# 见 deploy/gb.sh 的 VISION_CONFIG 变量。
+#
+# 【labels 为什么要过滤成 person】
+# COCO 80 类里还有 car / truck / bench 等。不过滤的话，画面里的车、
+# 椅子都会触发事件，告警中心会被无关事件淹没。只留 person 才是「人形检测」。
+# ============================================================================
+vision:
+  enabled: true
+
+  # 模型目录（相对进程工作目录 /opt/gb28181）
+  model-dir: models
+
+  models:
+    - id: yolox-nano
+      file: yolox_nano.onnx
+      format: YOLOX            # 必须与 preprocess 配对，配错会「分数挤在 0.31~0.34」
+      input-size: 416
+      preprocess: yolox        # 0~255 + BGR + letterbox 填 114
+      labels: []               # 空 = 内置 COCO 80 类
+
+  default-model: yolox-nano
+
+  # 两路人形检测。
+  # 通道格式：设备编码/通道编码
+  #   10001/10001-1                          大华 SDK 直连（已验证出图）
+  #   34020000002000000006/43010002031329014839   国标球机（白水塘水库单球机）
+  #
+  # 选国标通道而不是 34020000001310000001 的原因：那台 EasyIPC 已离线（状态 OFF），
+  # 视觉检测拿不到流，日志会每 30 秒刷一条「通道不在线」。
+  channels:
+    - "10001/10001-1"
+    - "34020000002000000006/43010002031329014839"
+
+  # 每路推理帧率。CPU 推理 1 fps 是实测可用的值（单帧 60~90ms）
+  fps: 1.0
+  queue-capacity: 4
+
+  # 推理线程数。CPU 推理建议不超过核数一半，否则会拖慢信令与转发
+  worker-threads: 2
+
+  # 人形检测阈值：太低会把树影/衣物误判成人，太高会漏掉远处的人
+  confidence-threshold: 0.45
+
+  # 去抖：连续 3 帧且持续 2 秒才算「真的有人」，避免单帧误检就告警
+  min-event-frames: 3
+  min-event-millis: 2000
+
+  # 同一路同一标签 30 秒内不重复告警（人站着不动时不会每 2 秒刷一条）
+  event-cooldown-millis: 30000
+
+  raise-alarm: true
+  save-snapshot: true
+
+  # 只关心人形：过滤掉 car / truck / bench 等
+  labels:
+    - person

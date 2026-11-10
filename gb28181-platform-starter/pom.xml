@@ -185,6 +185,33 @@
       <artifactId>gb28181-sip-zlm</artifactId>
     </dependency>
 
+    <!--
+      视觉识别（AI）三件套。依赖方向单向：
+        starter → vision-pipeline → vision-api
+        starter → vision-onnx    → vision-api
+
+      vision-api 零依赖（纯 JDK），任何项目都能直接拿去用；
+      vision-onnx 只多一个 onnxruntime；vision-pipeline 只依赖 vision-api。
+
+      为什么不把这些类直接写进 starter：
+      模型层不应该认识 GB28181 / ZLM / 数据库。分层之后「换模型 / 换引擎 /
+      换项目」都不动业务代码，也让检测逻辑可以脱离 Spring 单测。
+
+      模型文件随包分发（vision-onnx/models/），不联网下载。
+    -->
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>vision-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>vision-pipeline</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.rurulalanana</groupId>
+      <artifactId>vision-onnx</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
