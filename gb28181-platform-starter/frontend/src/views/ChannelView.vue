@@ -295,6 +295,34 @@
               :disabled="!playing"
               mode="targettrack"
             />
+
+            <!--
+              AI 检测框。只对「已开启检测且正在播放」的通道渲染。
+              结果过期时组件内部会变灰，避免用户把冻结的框当成实时结果。
+            -->
+            <VisionBox
+              v-if="previewTarget && playing && vision.isOn(visionKey)"
+              :detections="vision.boxesOf(visionKey)"
+              :stale="vision.isStale(visionKey)"
+            />
+
+            <!--
+              AI 检测开关：叠在画面右上角（不影响左下角的播放器控制栏）。
+              用 button 而不是 el-button：要绝对定位盖在视频上，
+              el-button 的 margin / 行高在绝对定位下会偏。
+            -->
+            <button
+              v-if="vision.enabled.value && previewTarget"
+              type="button"
+              class="video-ai-btn"
+              :class="{ 'is-on': vision.isOn(visionKey) }"
+              :disabled="!playing || vision.isPending(visionKey)"
+              :title="vision.isOn(visionKey) ? '停止这一路的 AI 检测' : '对这一路开启人形检测'"
+              @click.stop="toggleVision"
+            >
+              <el-icon :size="12"><Aim /></el-icon>
+              {{ vision.isOn(visionKey) ? 'AI 检测中' : 'AI 检测' }}
+            </button>
             <!--
               状态角标叠在画面左上角。挂在右栏时那 65px 会全变成视频上下的黑边，
               而「这路流现在什么状态」本来就是在说画面本身。
@@ -419,9 +447,11 @@ import { useLivePlayer } from '@/composables/useLivePlayer'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
+import { useVision } from '@/composables/useVision'
 import { useAuthStore } from '@/stores/auth'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TrackBox from '@/components/TrackBox.vue'
+import VisionBox from '@/components/VisionBox.vue'
 import TablePager from '@/components/TablePager.vue'
 import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
 
@@ -513,6 +543,46 @@ watch(
 const playing = computed(() => player.playing.value)
 const state = computed(() => player.state.value)
 const stateType = usePlayerStateType(state)
+
+// ==================== AI 检测 ====================
+
+/**
+ * 检测开关与结果轮询。
+ *
+ * <p>通道管理页和直播页各持有一份实例：这个页面同一时刻只预览一个通道，
+ * 轮询列表也只有那一个，开销可以忽略；共用一个全局单例反而要处理
+ * 「页面切走时该不该停」这类跨页面生命周期问题。
+ */
+const vision = useVision()
+
+/** 当前预览通道的检测键：{@code 设备编码/通道编码}，与后端 channel 参数一致。 */
+const visionKey = computed(() =>
+  previewTarget.value ? `${previewTarget.value.deviceId}/${previewTarget.value.id}` : ''
+)
+
+/** 开/关当前预览通道的检测。 */
+async function toggleVision() {
+  const key = visionKey.value
+  if (!key) return
+  if (!playing.value) {
+    ElMessage.warning('请等画面出来后再开启检测')
+    return
+  }
+  const ok = await vision.toggle(key, !vision.isOn(key))
+  if (ok) syncVisionWatched()
+}
+
+/** 只轮「当前预览且已开检测」的那一路；没开检测就不轮，避免无谓请求。 */
+function syncVisionWatched() {
+  const key = visionKey.value
+  vision.setWatched(key && playing.value && vision.isOn(key) ? [key] : [])
+}
+
+/*
+ * 播放状态变化要同步检测轮询：画面还没出来时拉检测结果没意义
+ * （用户看不到），而刚播起来的通道要立刻开始轮询，否则要等下一次交互才出框。
+ */
+watch(playing, () => syncVisionWatched())
 
 /**
  * 云台面板是否可操作。
@@ -676,8 +746,15 @@ async function preview(row) {
   // 用户主动点开一个通道才算新的一轮，重置卡轨重建计数
   stallRetry = 0
   await ensureMediaPort()
+  /*
+   * 先读一次检测总览：弹窗里的按钮要根据「后端这一路是不是本来就在检测」
+   * 决定显示「AI 检测」还是「AI 检测中」。不读的话用户会看到「AI 检测」，
+   * 点一下反而把已经在跑的检测关掉。
+   */
+  await vision.refreshStatus()
   await sleep(120)
   await startPlay()
+  syncVisionWatched()
 }
 
 /**
@@ -925,6 +1002,8 @@ function closePreview() {
   previewDialog.value = false
   // 关窗时框选图层必须一起退掉，否则下次打开弹窗它会保持着激活状态
   trackActive.value = false
+  // 停掉检测轮询：画面已经看不到了，继续拉检测结果是纯浪费
+  vision.setWatched([])
   // 立即断流：不要等 300ms 的关闭动画，让 ZLM 早点释放这路拉流
   // 先退掉「CSS 全屏」兜底（切协议重建播放器时可能用上），否则它固定覆盖整屏
   player.exitCssFullscreen()
@@ -1471,6 +1550,52 @@ onUnmounted(() => player.stop())
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * AI 检测开关叠在画面右上角：状态角标占左上、播放器控制栏在底部，
+ * 右上角是唯一不会被遮挡的位置。要接管指针事件（这是个按钮），
+ * 所以不能像 .video-state 那样 pointer-events:none。
+ */
+.video-ai-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(8, 13, 20, 0.66);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  cursor: pointer;
+  transition: background 0.16s, border-color 0.16s;
+}
+
+.video-ai-btn:hover:not(:disabled) {
+  background: rgba(8, 13, 20, 0.85);
+  border-color: rgba(255, 255, 255, 0.38);
+}
+
+/* 开启时用绿色实心：一眼看出「这一路正在耗 CPU 做推理」 */
+.video-ai-btn.is-on {
+  border-color: #52c41a;
+  background: #52c41a;
+  color: #fff;
+}
+
+.video-ai-btn.is-on:hover:not(:disabled) {
+  border-color: #73d13d;
+  background: #73d13d;
+}
+
+.video-ai-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .video-state-dot {
