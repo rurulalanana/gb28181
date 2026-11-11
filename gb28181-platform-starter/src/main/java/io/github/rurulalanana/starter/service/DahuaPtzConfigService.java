@@ -1555,10 +1555,6 @@ public class DahuaPtzConfigService {
         throw BizException.badRequest("时间格式应为 HH:mm 或 HH:mm:ss：" + t);
     }
 
-    private static int clamp(int v, int min, int max) {
-        return Math.max(min, Math.min(max, v));
-    }
-
     /**
      * 归一化 {@code TimeSection} 的原文。
      *

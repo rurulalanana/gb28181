@@ -1,6 +1,5 @@
 package io.github.rurulalanana.starter.service;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import io.github.rurulalanana.starter.config.Gb28181Properties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

@@ -203,26 +203,6 @@ public class StreamService {
     }
 
     /**
-     * SDK 直连设备的码流编号。
-     *
-     * <p>与国标路径保持同一口径：<b>请求显式值 &gt; 设备配置的码流索引 &gt; 主码流</b>。
-     *
-     * <p>区别在于「自动」的落地：国标「自动」是 SSRC 后 4 位用域内自增序号（{@code -1}），
-     * 而 RTSP 的 {@code subtype} 必须是确定值，所以「自动」回退到<b>主码流</b>（0）——
-     * 与子码流相比，主码流清晰度优先，符合「没有明确要求时给最好的画面」。
-     *
-     * <p>早期这里写死 0，导致设备上配了「子码流」也不生效，
-     * 弱网现场仍然拉主码流，白白占带宽。
-     */
-    private int resolveSdkStreamNumber(GbDevice device, Integer requested) {
-        if (requested != null && requested >= 0) {
-            return requested;
-        }
-        int configured = StreamIndex.of(device.getStreamIndex()).getStreamNumber();
-        return configured < 0 ? 0 : configured;
-    }
-
-    /**
      * SDK 直连设备（大华等）的实时点播。
      *
      * <h3>两条路径，按「有没有 SDK 会话」自动选</h3>

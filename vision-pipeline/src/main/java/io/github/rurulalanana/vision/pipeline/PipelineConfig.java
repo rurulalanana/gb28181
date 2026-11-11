@@ -1,20 +1,6 @@
 package io.github.rurulalanana.vision.pipeline;
 
-import io.github.rurulalanana.vision.DetectorConfig;
-import io.github.rurulalanana.vision.Detection;
-import io.github.rurulalanana.vision.DetectionSink;
-import io.github.rurulalanana.vision.Frame;
-import io.github.rurulalanana.vision.VisionDetector;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 流水线配置。

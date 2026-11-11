@@ -2,8 +2,6 @@ package io.github.rurulalanana.starter.vo;
 
 import lombok.Data;
 
-import java.util.List;
-
 /** 权限点（即角色页右侧的一个按钮勾选框）。 */
 @Data
 public class PermissionVo {

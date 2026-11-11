@@ -1,7 +1,6 @@
 package io.github.rurulalanana.gb28181.sip;
 
 import io.github.rurulalanana.gb28181.sip.cluster.MessageRelay;
-import io.github.rurulalanana.gb28181.sip.device.DeviceRegistry;
 import io.github.rurulalanana.gb28181.sip.device.DeviceSession;
 import io.github.rurulalanana.gb28181.sip.device.LocalDeviceRegistry;
 import io.github.rurulalanana.gb28181.sip.event.SipCallback;

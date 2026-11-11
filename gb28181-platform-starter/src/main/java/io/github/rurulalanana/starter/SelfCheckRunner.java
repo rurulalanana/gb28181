@@ -10,8 +10,6 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.TimeUnit;
-
 /**
  * 启动自检：应用起来后自动向第一台在线设备发起点播，便于快速验证
  * 「注册 → INVITE → 收流」链路是否打通。

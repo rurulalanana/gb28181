@@ -527,6 +527,11 @@ const usedKeys = computed(
   () => new Set(tiles.value.filter((t) => t.channelKey).map((t) => t.channelKey))
 )
 
+/** 真正上屏且在播的格子，决定要不要静音。不能用 usedKeys：它含不可见格子。 */
+const audibleTiles = computed(
+  () => visibleTiles.value.filter((t) => t.channelKey && t.playing)
+)
+
 const onlineChannels = computed(() => channels.value.filter((c) => c.deviceOnline))
 
 /** 分组视图：按设备归拢通道，设备在线状态取该设备下任一通道。 */
@@ -721,6 +726,27 @@ function playerOf(tile) {
   return players[tile.id].api
 }
 
+/**
+ * 按上屏路数统一调整静音：多路全静音，剩一路放开。
+ *
+ * keepMuted 只在 play() 求值一次，路数变化后不会重算，所以需要持续跟随。
+ * 无音轨的流（hasAudio === false）跳过，否则喇叭图标与实际不符。
+ */
+function syncTileAudio() {
+  const audible = audibleTiles.value
+  const mute = audible.length > 1
+  for (const tile of audible) {
+    const api = players[tile.id]?.api
+    if (api && api.hasAudio.value !== false) api.setMuted(mute)
+  }
+}
+
+// 路数变化的入口有 6 处以上，用 watch 统一跟随，避免逐个补调用时漏掉
+watch(
+  () => audibleTiles.value.map((t) => t.channelKey).join(','),
+  () => syncTileAudio()
+)
+
 async function loadChannels() {
   try {
     const data = await deviceApi.channelList({ start: 0, limit: 1000 })
@@ -809,8 +835,8 @@ async function playTile(tile) {
 
   await player.play(streamId, urls, {
     proto: proto.value,
-    // 多格同播才静音（一格出声就是一墙回声）；只开一路画面时正常出声，省得用户再去点喇叭
-    keepMuted: usedKeys.value.size > 1,
+    // 多格同播才静音。加 1 是因为此刻本格还没进 playing，audibleTiles 不含它
+    keepMuted: audibleTiles.value.length + (tile.playing ? 0 : 1) > 1,
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
     onStall: () => rebuildStalled(tile),
     // 播放器自动改协议时同步顶部下拉（典型：FLV 解码失败重试耗尽 → 切 WebRTC）。

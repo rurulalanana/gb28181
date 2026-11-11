@@ -3,7 +3,6 @@ package io.github.rurulalanana.starter.vo;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 
-import java.math.BigDecimal;
 import java.util.List;
 
 /** 级联通道列表。 */

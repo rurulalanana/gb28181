@@ -1,7 +1,6 @@
 package io.github.rurulalanana.dahua;
 
 import com.netsdk.lib.NetSDKLib;
-import com.sun.jna.ptr.IntByReference;
 import io.github.rurulalanana.dahua.internal.DahuaNativeLibrary;
 import io.github.rurulalanana.dahua.internal.DahuaPtzCommand;
 import io.github.rurulalanana.dahua.internal.DahuaSdk;

@@ -82,12 +82,6 @@ public class PtzCommand {
     /** 数据3（第 7 字节高 4 位）。 */
     private Integer data3;
 
-    // ---------- 组合码1 的低 4 位：校验位 ----------
-    private boolean checksum1;
-    private boolean checksum2;
-    private boolean checksum3;
-    private boolean checksum4;
-
     // ==================== 便捷方法 ====================
 
     public PtzCommand left() {
@@ -298,8 +292,6 @@ public class PtzCommand {
         // ---- 字节2：高 4 位版本信息(本标准为 0H) + 低 4 位校验位 ----
         // 标准 A.3: 校验位 = (字节1的高4位 + 字节1的低4位 + 字节2的高4位) % 16
         int ver = (version == null ? 0 : version) & 0x0F;
-        int c1 = (bit(checksum1) << 3) | (bit(checksum2) << 2)
-                | (bit(checksum3) << 1) | bit(checksum4);
         int b1 = 0xA5;
         int check1 = ((b1 >> 4) + (b1 & 0x0F) + ver) % 16;
         int b2 = (ver << 4) | (check1 & 0x0F);
@@ -342,10 +334,6 @@ public class PtzCommand {
         if ((cmd & 0x30) == 0x30) {
             throw new IllegalArgumentException("Bit5 与 Bit4 不应同时为 1（变倍放大/缩小互斥）");
         }
-    }
-
-    private static int bit(boolean b) {
-        return b ? 1 : 0;
     }
 
     private static int clamp(Integer v, int max) {

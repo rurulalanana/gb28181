@@ -644,17 +644,6 @@ public class PlaybackController {
         return segSeconds <= 0 || wantSeconds >= segSeconds * 99 / 100;
     }
 
-    private String resolveChannel(String streamid, String serial, String code) {
-        RtpSession session = resolveSession(streamid, serial, code);
-        if (session != null) {
-            return session.getChannelId();
-        }
-        if (streamid != null && !streamid.isBlank()) {
-            return channelOf(streamid);
-        }
-        return DeviceRef.channelOf(serial, code);
-    }
-
     /**
      * 从 {@code <设备编码>/<通道编码>} 取出通道编码。不盲拆斜杠：GB28181 编码不含斜杠，
      * 历史流名曾形如 {@code <通道编码>/<序号>}，只有第二段是 20 位编码时才算复合标识。

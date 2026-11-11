@@ -356,49 +356,6 @@ public class CascadeService {
         return cascade;
     }
 
-    /** 收集要共享的通道：共享全部时取所有通道，否则取显式共享的。 */
-    private List<GbChannel> collectSharedChannels(GbCascade cascade) {
-        List<GbChannel> all = deviceService.allChannels();
-        if (Boolean.TRUE.equals(cascade.getShareAllChannel())) {
-            return all;
-        }
-        List<String> sharedKeys = new ArrayList<>(sharedChannelKeys(cascade.getCascadeId()));
-        java.util.Set<String> keySet = new java.util.HashSet<>(sharedKeys);
-        List<GbChannel> out = new ArrayList<>();
-        for (GbChannel c : all) {
-            if (keySet.contains(channelKey(c.getDeviceId(), c.getChannelId()))) {
-                out.add(c);
-            }
-        }
-        return out;
-    }
-
-    private void markPushed(String cascadeId, List<GbChannel> channels) {
-        for (GbChannel c : channels) {
-            GbCascadeChannel cc = cascadeChannelMapper.selectOne(
-                    Wrappers.<GbCascadeChannel>lambdaQuery()
-                            .eq(GbCascadeChannel::getCascadeId, cascadeId)
-                            .eq(GbCascadeChannel::getChannelId, c.getChannelId())
-                            .eq(GbCascadeChannel::getDeviceId, c.getDeviceId())
-                            .last("limit 1"));
-            if (cc == null) {
-                cc = new GbCascadeChannel();
-                cc.setCascadeId(cascadeId);
-                cc.setDeviceId(c.getDeviceId());
-                cc.setChannelId(c.getChannelId());
-                cc.setShared(true);
-                cc.setCreateTime(LocalDateTime.now());
-            }
-            cc.setPushed(true);
-            cc.setPushTime(LocalDateTime.now());
-            if (cc.getId() == null) {
-                cascadeChannelMapper.insert(cc);
-            } else {
-                cascadeChannelMapper.updateById(cc);
-            }
-        }
-    }
-
     /** 通道 → 目录项（级联推送时用自定义编号覆盖国标编号）。 */
     public CatalogItem toCatalogItem(GbChannel c, String event) {
         String exportedId = c.getCustomId() != null && !c.getCustomId().isBlank()
@@ -427,14 +384,6 @@ public class CascadeService {
                 // 事件类型：ON 首次全量、UPDATE 变更、DEL 删除；不写会让上级把每条都当新增，删掉的通道永远留着
                 .event(event == null || event.isBlank() ? "ON" : event)
                 .build();
-    }
-
-    private Gb28181SipClient requireClient() {
-        Gb28181SipClient client = clientProvider.client();
-        if (client == null) {
-            throw BizException.badRequest("SIP 信令服务未启动，无法推送目录");
-        }
-        return client;
     }
 
     private static String[] parseChannelRef(String item) {

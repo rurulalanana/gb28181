@@ -3,7 +3,6 @@ package io.github.rurulalanana.hikvision;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.jna.Memory;
-import com.sun.jna.Pointer;
 import io.github.rurulalanana.hikvision.internal.HikvisionCms;
 import io.github.rurulalanana.hikvision.internal.HikvisionSdk;
 import org.slf4j.Logger;
@@ -44,9 +43,6 @@ public class HikvisionIsapi {
 
     /** 响应缓冲区大小。设备资源列表在通道多时能到几百 KB。 */
     private static final int OUT_BUF_SIZE = 1024 * 1024;
-
-    /** 请求缓冲区大小（写配置时用）。 */
-    private static final int IN_BUF_SIZE = 256 * 1024;
 
     private final HikvisionRegisterTable table;
 

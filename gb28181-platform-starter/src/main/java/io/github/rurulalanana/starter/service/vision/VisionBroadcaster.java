@@ -55,14 +55,6 @@ public class VisionBroadcaster {
      */
     private static final long TICK_MS = 200;
 
-    /**
-     * 单个连接未发出的消息上限。
-     *
-     * <p>超了就<b>丢最旧的</b>：实时画框宁可跳一帧，也不能让一个卡住的
-     * 客户端把服务端内存吃掉（16 路 × 每帧几十个框，积压起来很快）。
-     */
-    private static final int MAX_PENDING = 32;
-
     /** 一个订阅者（一个 WebSocket 连接）。 */
     public interface Subscriber {
         /**

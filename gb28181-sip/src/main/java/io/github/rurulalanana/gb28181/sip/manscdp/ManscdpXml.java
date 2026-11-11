@@ -6,8 +6,6 @@ import org.w3c.dom.Element;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilderFactory;
-
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.parsers.ParserConfigurationException;
@@ -157,11 +155,6 @@ public final class ManscdpXml {
         return doc.createElement(name);
     }
 
-    /**
-     * 创建元素并挂到 {@code parent} 下。
-     *
-     * @return 新建的元素
-     */
     public static Element newElement(Element parent, String name) {
         Element e = parent.getOwnerDocument().createElement(name);
         parent.appendChild(e);
