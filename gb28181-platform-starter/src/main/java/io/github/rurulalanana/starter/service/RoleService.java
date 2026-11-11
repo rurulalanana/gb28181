@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 /**
@@ -45,6 +46,21 @@ public class RoleService {
      * 整体替换引用（不可变 Map），读路径无需加锁。
      */
     private volatile Map<String, Set<String>> grantCache;
+
+    /**
+     * 重建缓存时用的锁。
+     *
+     * <p><b>为什么是 {@link ReentrantLock} 而不是 {@code synchronized}</b>：
+     * 锁内是「一条角色列表 + 每角色一条权限」的<b>十几次数据库查询</b>，
+     * 而 {@link #grants()} 又在 <b>每个请求</b>的权限校验路径上
+     * （{@code WritePermissionInterceptor} → {@code SaTokenPermissionProvider}）。
+     * 缓存刚失效时（启动后首个请求、改过角色之后的第一个请求）全部并发请求会挤在这个锁上，
+     * 拿着锁的那个线程还要等 Hikari 连接（实测 {@code -Djdk.tracePinnedThreads} 抓到
+     * {@code RoleService.grants <== monitors:1} 的 pin 记录）。
+     * 虚拟线程在 {@code synchronized} 里 park 会<b>钉住载体线程</b>，
+     * 载体线程只有「核数」那么多，一下就没了；{@code ReentrantLock} 不会。
+     */
+    private final ReentrantLock grantLock = new ReentrantLock();
 
     // ==================== 读取 ====================
 
@@ -106,7 +122,8 @@ public class RoleService {
         if (snapshot != null) {
             return snapshot;
         }
-        synchronized (this) {
+        grantLock.lock();
+        try {
             if (grantCache != null) {
                 return grantCache;
             }
@@ -120,6 +137,8 @@ public class RoleService {
             grantCache = Map.copyOf(built);
             log.debug("角色权限缓存已重建：{} 个启用角色", grantCache.size());
             return grantCache;
+        } finally {
+            grantLock.unlock();
         }
     }
 

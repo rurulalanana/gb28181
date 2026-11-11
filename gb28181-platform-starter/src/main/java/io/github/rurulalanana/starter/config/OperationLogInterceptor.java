@@ -195,18 +195,36 @@ public class OperationLogInterceptor implements HandlerInterceptor {
         return false;
     }
 
-    /** 取操作人（用户名；未登录接口如 /login 返回 null）。 */
+    /**
+     * 取操作人（用户名；未登录接口如 /login 返回 null）。
+     *
+     * <p><b>不要把数据库查询写进 {@code computeIfAbsent} 的映射函数里。</b>
+     * {@code ConcurrentHashMap.computeIfAbsent} 在计算期间会持有该桶的<b>监视器</b>，
+     * 于是：① 同一个桶的其它用户 id 也被挡住，② 虚拟线程在监视器里等 JDBC 会
+     * <b>钉住载体线程</b>（实测 {@code -Djdk.tracePinnedThreads} 抓到
+     * {@code ConcurrentHashMap.computeIfAbsent <== monitors:1}）。
+     * 这个方法在<b>每个请求</b>的 {@code afterCompletion} 里跑，属于纯热路径。
+     *
+     * <p>改成「先查缓存 → 未命中再算 → {@code putIfAbsent} 回填」：
+     * 极端情况下两个并发请求会各查一次库，但两者拿到的是同一个用户，结果一致，
+     * 代价远小于「持锁等数据库」。
+     */
     private String operator() {
         try {
             long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
-            return userNames.computeIfAbsent(userId, id -> {
-                try {
-                    GbUser user = userService.findById(id);
-                    return user != null ? user.getUsername() : String.valueOf(id);
-                } catch (Exception e) {
-                    return String.valueOf(id);
-                }
-            });
+            String cached = userNames.get(userId);
+            if (cached != null) {
+                return cached;
+            }
+            String name;
+            try {
+                GbUser user = userService.findById(userId);
+                name = user != null ? user.getUsername() : String.valueOf(userId);
+            } catch (Exception e) {
+                name = String.valueOf(userId);
+            }
+            String previous = userNames.putIfAbsent(userId, name);
+            return previous != null ? previous : name;
         } catch (Exception e) {
             return null;
         }

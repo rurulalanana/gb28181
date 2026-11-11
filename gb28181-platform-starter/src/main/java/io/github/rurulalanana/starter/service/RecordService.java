@@ -82,8 +82,18 @@ public class RecordService {
     /** 厂商扩展能力：有录像检索能力的设备走同步调用，不经过 SIP。 */
     private final DeviceExtensionRegistry extensions;
 
-    /** 设备录像检索的同通道串行锁：必须按通道而非全局，否则一次慢查询会卡住所有通道。 */
-    private final Map<String, Object> channelLocks = new ConcurrentHashMap<>();
+    /**
+     * 设备录像检索的同通道串行锁：必须按通道而非全局，否则一次慢查询会卡住所有通道。
+     *
+     * <p><b>用 {@link java.util.concurrent.locks.ReentrantLock} 而不是 synchronized 代码块</b>：
+     * 锁内执行的是 {@code doQuery} —— 下发 SIP 查询并等到设备应答，典型 1~5 秒，慢设备更久。
+     * Java 21 的 {@code synchronized} 会让虚拟线程<b>钉住（pin）</b>载体线程，
+     * 一个等 5 秒的查询就把一个载体线程也锁 5 秒；载体线程只有「核数」那么多，
+     * 几个人同时换通道就能把整个平台的虚拟线程吞吐拖没。
+     * {@code ReentrantLock} 在 park 时会释放载体线程，不在此限。
+     */
+    private final Map<String, java.util.concurrent.locks.ReentrantLock> channelLocks =
+            new ConcurrentHashMap<>();
 
     /** 相同查询窗口的短时缓存：{@code 通道|起|止} → 结果。 */
     private final Map<String, CachedRecords> recordCache = new ConcurrentHashMap<>();
@@ -216,9 +226,13 @@ public class RecordService {
              * 先发的那个永远等不到应答。界面「换通道」会同时触发当天检索与最近 15 分钟状态两次查询，
              * 不串行则每换一次通道必然产生一次假超时。
              */
-            Object lock = channelLocks.computeIfAbsent(channelId, k -> new Object());
-            synchronized (lock) {
+            java.util.concurrent.locks.ReentrantLock lock = channelLocks.computeIfAbsent(
+                    channelId, k -> new java.util.concurrent.locks.ReentrantLock());
+            lock.lock();
+            try {
                 result = doQuery(media, deviceId, channelId, startTime, endTime, timeoutSeconds);
+            } finally {
+                lock.unlock();
             }
             /* 只缓存设备应答过的查询：缓存失败结果会让重试立刻又拿到同一个失败。 */
             if (result.deviceAnswered()) {

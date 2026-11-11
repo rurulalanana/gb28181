@@ -1959,8 +1959,8 @@ public final class DahuaExtAccess {
     /**
      * 配置项 JSON 字节 → 字符串。
      *
-     * <p>与 {@code DahuaCgiAccess} 里实测的结论一致：设备 {@code configManager}
-     * 返回的是 <b>UTF-8</b>（{@code PtzTour[0][0].Name} 按 GBK 解就是「宸¤埅缇ょ祫1」）。
+     * <p>实测结论：设备 {@code configManager} 返回的是 <b>UTF-8</b>
+     * （{@code PtzTour[0][0].Name} 按 GBK 解就是「宸¤埅缇ょ祫1」）。
      * 早先这里硬用 GBK，配置里的中文名（巡航线名、预置点分组名）全变乱码。
      */
     private static String trimNul(byte[] buffer) {

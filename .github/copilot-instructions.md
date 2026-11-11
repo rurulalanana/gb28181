@@ -9,12 +9,12 @@ GB/T 28181 视频监控平台的六个 Maven 模块，**单 git 仓库 + 父子�
 
 | 目录 | 版本 | 字节码目标 | 职责 |
 |---|---|---|---|
-| `gb28181-sip/` | 2.0.0 | Java 17 | SIP 栈、MANSCDP、SDP、级联、集群。**零 Spring 依赖**，只做协议层 |
-| `gb28181-sip-zlm/` | 2.0.0 | Java 17 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
-| `device-access/` | 2.0.0 | Java 17 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
-| `sdk-dahua/` | 2.0.0 | Java 17 | 大华设备接入：`dahua` 实现 + **原生库** |
-| `sdk-hikvision/` | 2.0.0 | Java 17 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 + **原生库** |
-| `gb28181-platform-starter/` | 2.0.0 | Java 17 | Spring Boot 3.2.5 应用、REST、Vue 前端、业务表 |
+| `gb28181-sip/` | 2.0.0 | Java 21 | SIP 栈、MANSCDP、SDP、级联、集群。**零 Spring 依赖**，只做协议层 |
+| `gb28181-sip-zlm/` | 2.0.0 | Java 21 | 内嵌 ZLMediaKit（zlm4j）、RTP 收流、录像检索、回放控制 |
+| `device-access/` | 2.0.0 | Java 21 | 厂商无关契约：`DeviceKind` / `DeviceAccessProvider` / `DeviceMediaProvider` / `DeviceRegisterTable` |
+| `sdk-dahua/` | 2.0.0 | Java 21 | 大华设备接入：`dahua` 实现 + **原生库** |
+| `sdk-hikvision/` | 2.0.0 | Java 21 | 海康 ISUP（EHome）接入：注册/取流/回放/报警/抓图 + **原生库** |
+| `gb28181-platform-starter/` | 2.0.0 | Java 21 | Spring Boot 3.2.5 应用、REST、Vue 前端、业务表 |
 
 依赖方向单向：`starter → sip-zlm → sip`，`starter → sip`，
 `starter → sdk-dahua → device-access`，`starter → sdk-hikvision → device-access`。
@@ -106,11 +106,29 @@ npm --prefix gb28181-platform-starter/frontend run build   # 产物写入 src/ma
 
 ## 3. 硬约束（违反会出线上事故）
 
-- **统一 Java 17**：全工程用 `maven.compiler.release=17`（定义在根 pom 的 `java.version`）。
+- **统一 Java 21**：全工程用 `maven.compiler.release=21`（定义在根 pom 的 `java.version`）。
+  三个部署环境本来就是 21（开发机 LibericaJDK-21 / 服务器 JDK 21 / netsdk 的 jar 是 class 65
+  只能用 21 读），之前的 17 只是编译参数写小了。
   各模块不写 `source`/`target`，统一用 `release` —— 它会同时校验语法级别与平台 API，
-  能拦住「本地 JDK 21 编译通过、目标 JDK 17 上 NoSuchMethodError」。
-  sip / sip-zlm 早期是 Java 8，合并成单仓库后统一到 17（字节码 52 → 61）。
-  这是破坏性变更，所以全工程版本一并提到 2.0.0，没有复用 Central 上的 1.0.x。
+  能拦住「本地 JDK 21 编译通过、目标 JDK 21 上 NoSuchMethodError」。
+  sip / sip-zlm 早期是 Java 8，合并成单仓库后先到 17（字节码 52 → 61），现在到 21（→ 65）。
+  都是破坏性变更，所以全工程版本一并提到 2.0.0，没有复用 Central 上的 1.0.x。
+
+### 虚拟线程（直接用 21 的 API，不要写兼容层）
+
+- 全局开关在 `application.yml` 的 `spring.threads.virtual.enabled: true`，
+  Tomcat 请求处理 / `@Scheduled` / `@Async` 都是虚拟线程（日志里线程名是 `tomcat-handler-N`）。
+- 自建的后台执行器一律：
+  ```java
+  private final ExecutorService pool = Executors.newThreadPerTaskExecutor(
+          Thread.ofVirtual().name("prefix-", 0).factory());
+  ```
+  **不要**再写 `setVirtualThreads(true)` 那种「编译 17 运行 21」的兼容代码。
+- **不要在 `synchronized` 块里做阻塞 I/O**（JDBC / HTTP / SIP 等待）：虚拟线程会 **pin**
+  住载体线程，载体只有「核数」那么多，几个人同时等就能把吞吐拖没。
+  用 `ReentrantLock`。自查：`-Djdk.tracePinnedThreads=full` 启动后加压，日志里不应出现 `reason:MONITOR`。
+- **不要把数据库查询写进 `ConcurrentHashMap.computeIfAbsent` 的映射函数**：
+  计算期间持有桶监视器，同样是 pin，而且会连带挡住同桶的其它 key。
 - **不要在子模块写 `java.version`**：父 pom 是唯一来源，子模块写了会覆盖成两套口径。
 - **不要在子模块写 `<version>`**：六个模块共用一个版本号，只在根 `pom.xml` 写一次，
   模块间依赖由根 `dependencyManagement` 用 `${project.version}` 给出。

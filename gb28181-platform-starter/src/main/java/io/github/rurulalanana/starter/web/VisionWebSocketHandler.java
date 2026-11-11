@@ -24,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * AI 检测结果的 WebSocket 推送端点。
@@ -109,7 +110,16 @@ public class VisionWebSocketHandler extends TextWebSocketHandler {
          * 这里用对象锁串行化，而不是把发送丢进线程池 ——
          * 消息本身很小（几百字节），锁竞争可以忽略。
          */
-        final Object sendLock = new Object();
+        /**
+         * 该连接的发送锁：{@code WebSocketSession} 不允许并发发送。
+         *
+         * <p>用 {@link ReentrantLock} 而不是 {@code synchronized}：
+         * {@code ping}/{@code pong}、建连时的 {@code hello} 都跑在 Tomcat 请求线程上，
+         * 开启虚拟线程后那是虚拟线程；锁内是阻塞的网络写，
+         * {@code synchronized} 会把这个虚拟线程<b>钉住</b>在载体线程上，
+         * 一个慢客户的发送就能拖住整个平台的处理能力。
+         */
+        final ReentrantLock sendLock = new ReentrantLock();
 
         Conn(WebSocketSession session) {
             this.session = session;
@@ -151,8 +161,11 @@ public class VisionWebSocketHandler extends TextWebSocketHandler {
             }
             try {
                 String text = objectMapper.writeValueAsString(msg);
-                synchronized (sendLock) {
+                sendLock.lock();
+                try {
                     session.sendMessage(new TextMessage(text));
+                } finally {
+                    sendLock.unlock();
                 }
             } catch (IOException | IllegalStateException e) {
                 // 连接已断：交给 reaper 回收，这里不抛

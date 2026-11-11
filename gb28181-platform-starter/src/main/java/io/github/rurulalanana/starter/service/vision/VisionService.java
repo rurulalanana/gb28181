@@ -1,6 +1,7 @@
 package io.github.rurulalanana.starter.service.vision;
 
 import io.github.rurulalanana.starter.config.VisionProperties;
+import io.github.rurulalanana.starter.common.TimeFormats;
 import io.github.rurulalanana.starter.entity.GbStream;
 import io.github.rurulalanana.starter.entity.GbVisionChannel;
 import io.github.rurulalanana.starter.mapper.GbVisionChannelMapper;
@@ -493,7 +494,7 @@ public class VisionService {
             item.put("scenarioCategory", sc == null ? null : sc.category());
             item.put("remark", row.getRemark());
             item.put("createTime", row.getCreateTime() == null ? null
-                    : row.getCreateTime().toString());
+                    : TimeFormats.toDisplay(row.getCreateTime()));
 
             Running r = key == null ? null : running.get(key);
             item.put("running", r != null);

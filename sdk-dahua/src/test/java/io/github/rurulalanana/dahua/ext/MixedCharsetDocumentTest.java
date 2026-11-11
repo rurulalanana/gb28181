@@ -85,33 +85,4 @@ class MixedCharsetDocumentTest {
         String src = "{\"PtzSpeed\":[{\"PtzSpeed\":3}],\"Enable\":true}";
         assertEquals(src, DahuaExtAccess.decodeForTest(src.getBytes(StandardCharsets.US_ASCII)));
     }
-
-    // ==================== CGI 通路 ====================
-
-    private static byte[] mixedCgiBody() {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.writeBytes("table.PtzTour[0][0].Name=".getBytes(StandardCharsets.US_ASCII));
-        out.writeBytes(hex(GBK_NAME_HEX));
-        out.writeBytes("\r\ntable.PtzTour[0][2].Name=".getBytes(StandardCharsets.US_ASCII));
-        out.writeBytes(hex(UTF8_NAME_HEX));
-        out.writeBytes("\r\ntable.PtzSpeed[0].PtzSpeed=3\r\n".getBytes(StandardCharsets.US_ASCII));
-        return out.toByteArray();
-    }
-
-    @Test
-    void cgiMixedLinesAreBothDecodedCorrectly() {
-        String body = DahuaCgiAccess.decodeBody(mixedCgiBody());
-
-        assertTrue(body.contains("巡航群組1"), "GBK 行应解对，实际：" + body);
-        assertTrue(body.contains("巡航群組3"), "UTF-8 行应解对，实际：" + body);
-        assertFalse(body.contains("宸¤埅"), "不应出现乱码：" + body);
-        assertFalse(body.contains("\uFFFD"), "不应出现替换字符：" + body);
-        assertTrue(body.contains("PtzSpeed=3"), "ASCII 行应原样保留：" + body);
-    }
-
-    @Test
-    void cgiEmptyBodyIsEmptyString() {
-        assertEquals("", DahuaCgiAccess.decodeBody(new byte[0]));
-        assertEquals("", DahuaCgiAccess.decodeBody(null));
-    }
 }

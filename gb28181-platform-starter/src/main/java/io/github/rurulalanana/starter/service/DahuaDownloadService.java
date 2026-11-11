@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -54,11 +55,20 @@ public class DahuaDownloadService {
     private final DahuaCapabilityService dahuaCapability;
     private final Gb28181Properties props;
 
-    private final ExecutorService pool = Executors.newFixedThreadPool(MAX_CONCURRENT, r -> {
-        Thread t = new Thread(r, "dahua-download");
-        t.setDaemon(true);
-        return t;
-    });
+    /**
+     * 下载执行器：一个任务一个虚拟线程。
+     *
+     * <p>一次 2 小时的下载只是 {@code read()} 阻塞，早期用固定 3 个平台线程时
+     * 就是三个线程常年被这种「慢等 I/O」锁死。
+     *
+     * <p>并发数依旧限在 {@link #MAX_CONCURRENT}，改用 {@link Semaphore} <b>在任务内部</b>拿：
+     * 这是设备侧约束（同时只允许 3 个下载会话），不是平台资源约束。
+     */
+    private final ExecutorService pool = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("dahua-download-", 0).factory());
+
+    /** 真正限制「同时下载几个」的许可；必须在任务内部 acquire（见 {@link #pool}）。 */
+    private final Semaphore downloadPermits = new Semaphore(MAX_CONCURRENT);
 
     private final Map<String, Task> tasks = new ConcurrentHashMap<>();
 
@@ -97,8 +107,27 @@ public class DahuaDownloadService {
         return task.view();
     }
 
+    /**
+     * 真正的下载体。
+     *
+     * <p>信号量在<b>这里</b>拿而不是在 {@code submit()} 前拿：
+     * 前者排队的是虚拟线程（堆上几十字节），后者会把 HTTP 请求线程一起堵住。
+     * 排队等待期间任务状态保持 {@code PENDING}，界面上能看出「在等设备下载会话」
+     * 而不是卡死 —— 拿到许可后才转 {@code RUNNING}。
+     */
     private void runDownload(Task task, io.github.rurulalanana.dahua.internal.DahuaSdk.Session session,
                              int sdkChannel, String start, String end) {
+        boolean acquired = false;
+        try {
+            downloadPermits.acquire();
+            acquired = true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            task.state = "FAILED";
+            task.message = "等待下载会话时被中断";
+            task.finishedAt = LocalDateTime.now();
+            return;
+        }
         task.state = "RUNNING";
         try {
             long bytes = dahuaCapability.ext().downloadRecord(session, sdkChannel, start, end,
@@ -122,6 +151,11 @@ public class DahuaDownloadService {
             task.message = e.toString();
             task.finishedAt = LocalDateTime.now();
             log.warn("大华录像下载异常: task={}", task.taskId, e);
+        } finally {
+            // 无论成功失败都要归还许可，否则失败任务会把下载名额永久吃掉
+            if (acquired) {
+                downloadPermits.release();
+            }
         }
     }
 

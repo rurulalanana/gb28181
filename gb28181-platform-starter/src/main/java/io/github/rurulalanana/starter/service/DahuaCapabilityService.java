@@ -1,13 +1,11 @@
 package io.github.rurulalanana.starter.service;
 
-import io.github.rurulalanana.dahua.ext.DahuaCgiAccess;
 import io.github.rurulalanana.dahua.ext.DahuaExtAccess;
 import io.github.rurulalanana.dahua.ext.DahuaSdkException;
 import io.github.rurulalanana.dahua.internal.DahuaSdk;
 import io.github.rurulalanana.deviceaccess.ConnectMode;
 import io.github.rurulalanana.deviceaccess.DeviceKind;
 import io.github.rurulalanana.starter.common.BizException;
-import io.github.rurulalanana.starter.config.DahuaProperties;
 import io.github.rurulalanana.starter.entity.GbDevice;
 import com.netsdk.lib.NetSDKLib;
 import lombok.extern.slf4j.Slf4j;
@@ -54,20 +52,13 @@ public class DahuaCapabilityService {
      * 用 {@link ObjectProvider} 延迟到首次使用再解析即可。
      */
     private final ObjectProvider<DahuaPtzConfigService> ptzConfigProvider;
-    /** 设备 Web CGI 通道（配置写入兜底），无状态可复用。 */
-    private final DahuaCgiAccess cgi = new DahuaCgiAccess();
-    private final io.github.rurulalanana.dahua.ext.DahuaRpcAccess rpc =
-            new io.github.rurulalanana.dahua.ext.DahuaRpcAccess();
-    private final DahuaProperties dahuaProperties;
 
     public DahuaCapabilityService(DeviceService deviceService,
                                   ObjectProvider<DahuaExtAccess> extProvider,
-                                  ObjectProvider<DahuaPtzConfigService> ptzConfigProvider,
-                                  DahuaProperties dahuaProperties) {
+                                  ObjectProvider<DahuaPtzConfigService> ptzConfigProvider) {
         this.deviceService = deviceService;
         this.extProvider = extProvider;
         this.ptzConfigProvider = ptzConfigProvider;
-        this.dahuaProperties = dahuaProperties;
     }
 
     /** 取扁平配置写入器（首次调用时才解析，见字段注释）。 */
@@ -336,34 +327,6 @@ public class DahuaCapabilityService {
         out.put("absPan", info.stuAbsPosition.nPosX);
         out.put("absTilt", info.stuAbsPosition.nPosY);
         return out;
-    }
-
-    /**
-     * 取设备 Web CGI 通道（配置写入的兜底路径）。
-     *
-     * <p>只在 SDK 写入被设备拒绝时用：部分型号的场景数组类配置项
-     * （{@code VideoColor} / {@code VideoInSharpness} …）通过
-     * {@code CLIENT_SetNewDevConfig} 一律 {@code err=12}，
-     * 而设备自己的 Web 界面能改，走的就是这条 {@code configManager.cgi}。
-     * 详见 {@code DahuaCgiAccess} 的类注释。
-     */
-    public DahuaCgiAccess cgi() {
-        return cgi;
-    }
-
-    /**
-     * RPC2 通道（懒创建，全局共用一个：session 与 object id 需要跨调用缓存）。
-     *
-     * <p>只在「CGI 与 netsdk 都没有对应能力」时用，见 {@code DahuaRpcAccess} 类注释。
-     */
-    public io.github.rurulalanana.dahua.ext.DahuaRpcAccess rpc() {
-        return rpc;
-    }
-
-    /** 设备 Web（HTTP CGI）端口，见 {@code dahua.http-port}。 */
-    public int httpPort() {
-        return dahuaProperties == null ? DahuaCgiAccess.DEFAULT_HTTP_PORT
-                : dahuaProperties.getHttpPort();
     }
 
     /**

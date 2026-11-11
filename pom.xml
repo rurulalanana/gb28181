@@ -76,22 +76,27 @@
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
     <!--
-      全工程统一 Java 17。
+      全工程统一 Java 21。
 
-      【历史】早期 sip / sip-zlm 是 Java 8（为了让只跑 JDK 8 的对接方也能用这两个协议库）。
-      合并成单仓库父子工程后统一到 17：整个平台只交付一个 Spring Boot jar，
-      sip / sip-zlm 不再作为独立可被第三方直接依赖的产物单独发布。
+      【为什么是 21】平台大量工作在等 I/O（SIP 下行、ZLM 写盘、设备 CGI/RPC2、数据库），
+      用虚拟线程后阻塞不再占平台线程，这是本工程最大的吞吐来源。
+      虚拟线程是 JDK 21 的正式特性，所以 21 是硬性要求，不是「顺便用新版本」。
 
-      【破坏性，改动前请知情】Maven Central 上已发布的 sip 1.0.0~1.0.6 /
-      sip-zlm 1.0.0~1.0.4 都是 Java 8 字节码（major=52）。
-      统一到 17 后产出的 class 是 major=61，JDK 8 / 11 的用户无法加载。
-      因此本轮把全工程版本统一提到 2.0.0（见根 <version>），不复用 1.0.x 坐标。
+      【早先是 17，为什么现在可以改】三个部署环境本来就是 21：
+        · 开发机 / 本地脚本：LibericaJDK-21（restart-local.ps1、start-*.bat）
+        · 服务器：JDK 21（docs/部署说明.md、scripts/remote-build.sh）
+        · sdk-dahua 的 netsdk jar 本身就是 class 65（Java 21），
+          prepare-netsdk.sh 一直要求 JDK 21 —— 17 根本读不了它。
+      也就是说「统一 17」从未在真实环境生效，只是编译参数写小了。
+
+      【破坏性】字节码 major 从 61 变成 65，JDK 17 及以下无法加载本工程的 jar。
+      Maven Central 上 sip 1.0.x / sip-zlm 1.0.x 仍是 Java 8 字节码，
+      要留在 JDK 8/11 上用的对接方请继续用 1.0.x，不要跟到 2.0.0。
 
       各模块都用 maven.compiler.release 声明，不写 source/target：
-      release 会同时校验「语法级别」与「平台 API」，能拦住
-      「本地 JDK 21 能过、目标 JDK 17 上跑不起来」这类问题。
+      release 会同时校验「语法级别」与「平台 API」。
     -->
-    <java.version>17</java.version>
+    <java.version>21</java.version>
     <maven.compiler.release>${java.version}</maven.compiler.release>
 
     <!-- ========== 第三方依赖版本（全模块统一） ========== -->

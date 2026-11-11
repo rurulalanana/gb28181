@@ -656,8 +656,8 @@ public class DahuaCameraConfigService {
             } catch (DahuaSdkException e) {
                 /*
                  * 不直接抛：场景数组类配置项在部分型号上这个入口就是不可用的
-                 * （设备返回 err=12，连原样写回都拒），但它的 Web CGI 能写。
-                 * 先记下，等会儿改走 CGI 再判生死。
+                 * （设备返回 err=12，连原样写回都拒）。先记下，交给下面的
+                 * 扁平写入兜底（它走同一套 SDK 会话，只是下发形状不同）。
                  */
                 sdkRejected = e;
             } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
@@ -673,7 +673,7 @@ public class DahuaCameraConfigService {
              * <b>这里只保留两种去向</b>：
              * <ul>
              *   <li>读回已是目标值 → 完成</li>
-             *   <li>还没读到目标值 → 进 pending，交给下面的 CGI 兜底</li>
+             *   <li>还没读到目标值 → 进 pending，交给下面的扁平写入兜底</li>
              * </ul>
              * 不要在这里按 {@code sdkRejected} 提前 continue ——
              * 「SDK 写失败」正是<b>最需要</b>走兜底的情况，
@@ -686,19 +686,18 @@ public class DahuaCameraConfigService {
                 }
             }
             /*
-             * ⑤ SDK 写失败、或写了没生效 → 改走设备自己的 CGI 通道。
+             * ⑤ SDK 整对象写失败、或写了没生效 → 改走「整项读出 → 按扁平键改 → 整项写回」。
              *
              * 实测依据：同一批参数（VideoColor 的亮度、VideoInSharpness 的锐度…）
-             * 用 CLIENT_SetNewDevConfig 一律 err=12，而设备 Web 界面
-             * 用 configManager.cgi?action=setConfig&VideoColor[0][0].Brightness=60 改得好好的。
-             * 所以不是参数不可写，是这个 SDK 入口对数组型配置不适用。
+             * 用 CLIENT_SetNewDevConfig 整对象下发一律 err=12，而逐键扁平下发能成功。
+             * 两条路都是 SDK 会话（能穿透 NAT），区别只在报文形状。
              */
             if (!pending.isEmpty()) {
-                pending = writeViaCgi(session, command, sdkChannel, pending);
+                pending = writeFlatFallback(session, command, sdkChannel, pending);
             }
             collectNotEffective(session, command, sdkChannel, pending, notEffective);
             if (sdkRejected != null && !pending.isEmpty()) {
-                log.warn("大华相机参数写入失败（SDK 与 CGI 都未生效）: device={} channel={} command={} {}",
+                log.warn("大华相机参数写入失败（整对象与逐键都未生效）: device={} channel={} command={} {}",
                         deviceId, channelCode, command, sdkRejected.getMessage());
             }
             /*
@@ -1028,36 +1027,36 @@ public class DahuaCameraConfigService {
     }
 
     /**
-     * 改走设备 Web CGI 写入，返回<b>仍然没生效</b>的那些参数。
+     * 逐键扁平写入兜底，返回<b>仍然没生效</b>的那些参数。
      *
-     * <h3>为什么要这条兜底</h3>
+     * <h3>为什么需要这条兜底</h3>
      * 部分型号（实测固件 {@code 3.201.0000007.1.R} 的 IPC）对<b>场景数组</b>
      * 类配置项（{@code VideoColor} / {@code VideoInSharpness} / {@code VideoInExposure}
      * / {@code VideoInWhiteBalance} / {@code VideoInDenoise}）的
      * {@code CLIENT_SetNewDevConfig} 一律返回 {@code err=12}，
-     * 连「读出来原样写回」都被拒；而设备 Web 界面改同一批参数是成功的。
-     * 所以不是参数不可写，是这个 SDK 入口对数组型配置不适用。
+     * 连「读出来原样写回」都被拒；但改成逐键扁平下发就能成功。
+     * 所以不是参数不可写，是那个下发形状对数组型配置不适用。
      *
      * <h3>怎么对应字段</h3>
-     * CGI 的 {@code getConfig} 返回的是一行行
+     * 扁平表的形状是一行行
      * {@code VideoColor[0][0].Brightness=50}，场景是第二维下标。
      * 这里按「键以 {@code .字段路径} 结尾」匹配，<b>命中几处就写几处</b> ——
-     * 与 SDK 路径「所有场景一起改」的语义保持一致，否则用户改了白天、夜里没变。
+     * 与整对象路径「所有场景一起改」的语义保持一致，否则用户改了白天、夜里没变。
      *
      * <p>带 {@code params.table.} 的键要跳过：那是早期误把整包响应写进设备留下的，
      * 再写它只是继续污染。
      *
      * @return 写了但回读仍不符合的条目（空 = 全部生效）
      */
-    private List<VarEntry> writeViaCgi(
+    private List<VarEntry> writeFlatFallback(
             io.github.rurulalanana.dahua.internal.DahuaSdk.Session session,
             String command, int sdkChannel, List<VarEntry> pending) {
         Map<String, String> lines;
         try {
             /*
-             * 用 SDK 读出来的扁平表代替 CGI 的 getConfig —— 键路径规则完全一致
+             * 用 SDK 读出来的扁平表作为基准 —— 键路径规则与设备配置项一致
              * （DahuaExtAccess.readConfigFlat 就是为了这个而存在的），
-             * 但走的是登录会话，能穿透 NAT。设备在 4G / NAT 后面时 CGI 根本不通。
+             * 且走的是登录会话，能穿透 NAT。
              */
             lines = dahuaCapability.ext().readConfigFlat(session, command, sdkChannel);
         } catch (Exception e) {
@@ -1096,7 +1095,7 @@ public class DahuaCameraConfigService {
                         continue;
                     }
                     if (key.endsWith(".Value1") || key.endsWith(".Value2")) {
-                        kv.put(key, cgiText(ms, lines.get(key)));
+                        kv.put(key, asFieldText(ms, lines.get(key)));
                         hits++;
                     }
                 }
@@ -1127,10 +1126,10 @@ public class DahuaCameraConfigService {
                         continue;
                     }
                     if (key.endsWith(".".concat(minField))) {
-                        kv.put(key, cgiText(pair.get(0), lines.get(key)));
+                        kv.put(key, asFieldText(pair.get(0), lines.get(key)));
                         hits++;
                     } else if (key.endsWith(".".concat(maxField))) {
-                        kv.put(key, cgiText(pair.get(1), lines.get(key)));
+                        kv.put(key, asFieldText(pair.get(1), lines.get(key)));
                         hits++;
                     }
                 }
@@ -1158,7 +1157,7 @@ public class DahuaCameraConfigService {
                          * <p>开关型但底层是字符串的（3DType=Auto/Off）要先行映射，
                          * 否则会写成 "true"，设备只认 Auto/Off。
                          */
-                        kv.put(key, cgiText(writeValueForParam(e.param(), e.value()), lines.get(key)));
+                        kv.put(key, asFieldText(writeValueForParam(e.param(), e.value()), lines.get(key)));
                         matched = field;
                     }
                 }
@@ -1188,7 +1187,7 @@ public class DahuaCameraConfigService {
             unresolved.addAll(pending);
             return unresolved;
         }
-        // 回读确认；CGI 声称 OK 也可能是「接受但没改」
+        // 回读确认；设备回 OK 也可能是「接受但没改」
         List<VarEntry> stillWrong = new ArrayList<>(unresolved);
         for (VarEntry e : pending) {
             if (unresolved.contains(e)) {
@@ -1205,7 +1204,7 @@ public class DahuaCameraConfigService {
      * 回读确认，允许设备慢半拍。
      *
      * <h3>为什么不能只读一次</h3>
-     * 设备的配置写入是<b>异步生效</b>的：CGI 已经返回 {@code OK}、设备自己
+     * 设备的配置写入是<b>异步生效</b>的：设备已经接受、它自己的
      * {@code getConfig} 也能读到新值，但紧接着用 SDK {@code GetNewDevConfig}
      * 读回来仍是旧值（实测 {@code VideoInOptions.Flip} 就是如此）。
      *
@@ -1223,7 +1222,7 @@ public class DahuaCameraConfigService {
         /*
          * 「接近焦距极限 = 自动」要校验的是 FocusLimitSelectMode，而不是 FocusLimit。
          * FocusLimit 此时根本不会被写（保持旧距离值），拿它去比永远不相等，
-         * 会白跑三次重试再白跑一遍 CGI 兜底，最后报 saved:false。
+         * 会白跑三次重试再白跑一遍扁平写入兜底，最后报 saved:false。
          */
         if (isFocusLimitAuto(e.param(), e.value())) {
             DahuaCameraConfig.Param modeParam =
@@ -1238,7 +1237,7 @@ public class DahuaCameraConfigService {
              *
              * 反例：3D 降噪是开关（用户提交 true），底层存的是 "Auto"。
              * 直接拿 "Auto" 去比 true 会因为 asBool("Auto")==false 而判成「没生效」，
-             * 于是每次都白跑一遍 CGI 兜底、最后还报 saved:false。
+             * 于是每次都白跑一遍扁平写入兜底、最后还报 saved:false。
              */
             Object got;
             if (e.param().type() == DahuaCameraConfig.Type.RANGE) {
@@ -1308,10 +1307,10 @@ public class DahuaCameraConfigService {
     }
 
     /**
-     * 值转成 CGI 需要的文本形态，<b>按目标字段现有的形态</b>对齐。
+     * 值转成设备字段需要的文本形态，<b>按目标字段现有的形态</b>对齐。
      *
      * <h3>为什么必须看现有值</h3>
-     * CGI 是纯字符串接口，设备对类型很挑：
+     * 配置项下发是纯字符串，设备对类型很挑：
      * <pre>
      *   VideoImageControl[0].Flip    = false   → 必须写 true/false
      *   VideoImageControl[0].Stable  = 0       → 必须写 1/0（写 true 会 Bad Request）
@@ -1325,7 +1324,7 @@ public class DahuaCameraConfigService {
      * @param v    目标值（可能是 Boolean / Number / String）
      * @param curr 该字段当前的文本值（如 {@code "0"} / {@code "false"}）；可为 {@code null}
      */
-    private static String cgiText(Object v, String curr) {
+    private static String asFieldText(Object v, String curr) {
         String cur = curr == null ? "" : curr.trim();
         boolean curIsBool = "true".equalsIgnoreCase(cur) || "false".equalsIgnoreCase(cur);
         boolean curIsInt = looksLikeInt(cur);

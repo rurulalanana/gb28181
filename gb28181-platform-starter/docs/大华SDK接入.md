@@ -364,7 +364,7 @@ GET /api/v1/device/capabilities?serial=10001
 
 | 端点 | 为什么不合并 |
 |---|---|
-| `cameraconfig/*` | CGI/RPC2 图像参数（曝光、背光、日夜…），国标无此协议 |
+| `cameraconfig/*` | 图像参数（曝光、背光、日夜…），国标无此协议，走 SDK 配置接口 |
 | `ptz/{tour,scan,pattern,speed,limit,idle,automovement}` | 巡航组/线扫/巡迹是**配置项**，国标 MANSCDP 没有 |
 | `register/*` | 大华主动注册表 |
 | `record/download` | 私有下载协议 |
@@ -417,9 +417,11 @@ RTSP 地址仍用 `channel=1`（另一套编号机制，实测取流正常），
 
 ### 9.6 云台配置项与实测取值（`DahuaPtzConfigService`）
 
-**走 CGI 而不是 SDK 的 JSON 配置接口**：这台设备对
-`CLIENT_GetNewDevConfig("PtzTour")` / `("PtzAutoMovement")` 一律返回失败，
-但同样的项通过 `configManager.cgi` 能正常读写（设备 Web 界面走的就是这条路）。
+**只走 SDK 的 JSON 配置接口**（`CLIENT_GetNewDevConfig` / `CLIENT_SetNewDevConfig`）。
+早期还同时维护过 HTTP 的 `configManager.cgi` 与 `/RPC2` 两条通路，现已全部删除：
+它们需要直连设备 Web 端口（80），**只能用于内网**；设备挂在 4G / NAT 后面时根本不通，
+而平台的主要部署场景恰恰是后者。用两条通路还要处理「谁优先、谁降级、谁熔断」，
+换来的只是「内网时快一点」—— 不值得。
 
 配置项对照（2026-11 在 192.168.10.156 逐页核对设备「PTZ設置」菜单）：
 
@@ -452,29 +454,28 @@ PTZ速度     PtzSpeed[ch].PtzSpeed / PatternSpeed
 | `AutoHoming.Time` | 秒 | UI 提示 5~86400，但设备不校验（0 和 86401 都收） |
 | `AutoPan[ch].PanSpeed` | **0~7** | 设备界面显示 1~8（内部值 +1），对外用 1~8、写入时 −1 |
 
-**`PtzSpeed` 只能通过 RPC2 写**：CGI 写 `PtzSpeed[0].PtzSpeed=4` 返回 OK 但值不变。
-
 **通道下标与 SDK 一致**：IPC 是 0，NVR 是 1~N。不要 +1，否则写到不存在的通道上
 （设备对越界下标通常静默忽略，表现为「保存成功但没生效」）。
 
-### 9.7 配置读取的双通路（CGI / SDK）
+### 9.7 配置读写：只有 SDK 一条路
 
-| 通路 | 穿透 NAT | 读得全 |
+| 通路 | 穿透 NAT | 状态 |
 |---|---|---|
-| CGI `configManager.cgi` | ❌ HTTP 直连设备 80 | ✅ 最全（设备 Web 界面走这条）|
-| SDK `CLIENT_GetNewDevConfig` | ✅ 走已建立的登录会话 | 多数项可以，个别型号对 `PtzTour` 返回失败 |
+| SDK `CLIENT_Get/SetNewDevConfig` | ✅ 走已建立的登录会话 | **唯一保留** |
+| HTTP `configManager.cgi` | ❌ 需直连设备 80 | 已删除 |
+| HTTP `POST /RPC2` | ❌ 需直连设备 80 | 已删除 |
 
-**采用「CGI 优先，失败降级 SDK」**：SDK 读到部分字段也返回非空，
-若因此跳过 CGI，读不全的字段会静默丢失，用户一保存就把缺的字段写没了。
-所以内网部署行为与改造前完全一致，只有 CGI 连不上才降级。
+SDK 返回的 JSON 与设备配置项是**同一套键路径**，`DahuaExtAccess.readConfigFlat()`
+把它转成扁平表（`PtzSpeed[0].PtzSpeed=3`），12 个 parse 方法因此不用区分来源。
 
-**熔断**：NAT 下 12 个配置项各等一次连接超时（3 秒）就是 36 秒，
-前端 30 秒超时后报「请求超时」。判定「Web 端口不可达」后记住，
-后续配置项直接走 SDK，总共只等一次。按「设备 + host:port」记，
-设备重连换出口地址会自动解除。
+**写入有两条 SDK 下发形状**，都要保留：
 
-`DahuaExtAccess.readConfigFlat()` 把 SDK 的 JSON 转成**与 CGI 逐字符相同的键路径**
-（`PtzSpeed[0].PtzSpeed`），12 个 parse 方法零改动。
+| 形状 | 适用 | 说明 |
+|---|---|---|
+| 整对象回写 | 大多数配置项 | 读出原 JSON → 改字段 → 整棵写回 |
+| 逐键扁平下发 | 场景数组类（`VideoColor` / `VideoInSharpness` …） | 整对象下发会被设备回 `err=12` |
+
+两条都是登录会话，区别只在报文形状，所以不需要「熔断 / 优先级」这类逻辑。
 
 ## 9.8 SDK 取流的音频（音视频双轨）
 

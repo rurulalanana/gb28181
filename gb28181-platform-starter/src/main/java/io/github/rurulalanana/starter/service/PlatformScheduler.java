@@ -10,6 +10,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 
 /**
  * 平台定时任务：指标采样（3s）、孤儿流认领（15s）、空闲流回收（20s）、目录分页回收 / 录像保活（30s）、
@@ -53,6 +56,27 @@ public class PlatformScheduler {
 
     /** 动态任务的调度心跳（毫秒）：5 秒使实际间隔误差不超过 5 秒，又不至于空转太频繁。 */
     private static final long TICK_MS = 5_000;
+
+    /**
+     * 「逐台设备」扇出的并发上限。
+     *
+     * <p>这是<b>设备侧</b>的约束（同一条设备同时开几个登录会话），不是平台资源约束，
+     * 因此换成虚拟线程后也不能取消。许可在任务内部拿，永远不会阻塞调度线程。
+     */
+    private static final int DEVICE_FANOUT_CONCURRENCY = 8;
+
+    /**
+     * 逐台设备扇出的执行器（虚拟线程）。
+     *
+     * <p>用于 SDK 设备在线探测这类「每台设备一次阻塞网络调用」的循环。
+     * 早期是 {@code for} 串行：单台探测超时 3~5 秒，几十台设备就能把一次巡检拖到几分钟，
+     * 期间该任务不可能再进入下一轮，界面上的在线状态就越来越滞后。
+     */
+    private final ExecutorService deviceFanout = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("gb-sched-device-", 0).factory());
+
+    /** 限制同时探测的设备数，见 {@link #DEVICE_FANOUT_CONCURRENCY}。 */
+    private final Semaphore deviceFanoutPermits = new Semaphore(DEVICE_FANOUT_CONCURRENCY);
 
     /**
      * 判断某个周期任务本次是否该执行：首次调用直接返回 {@code true}，
@@ -129,19 +153,47 @@ public class PlatformScheduler {
             log.warn("SDK 设备巡检读取设备列表失败: {}", e.getMessage());
             return;
         }
-        int online = 0;
+        /*
+         * 扇出到虚拟线程，而不是 for 串行。
+         *
+         * probeOnly 内部是一次 SDK 登录 + 登出：设备在线时几毫秒，
+         * 断电/RST 时要等满 TCP/协议超时（实测单台 3~5 秒）。
+         * 串行下 50 台里有 5 台不通，一轮巡检就要 20 秒以上，
+         * 调度线程被占着，而在线状态本该 60 秒刷新一次 —— 越拖越不准。
+         *
+         * 并发度由 deviceFanoutPermits 限定在 8 台，避免把设备的登录会话槽位挤爆。
+         */
+        java.util.concurrent.atomic.AtomicInteger online =
+                new java.util.concurrent.atomic.AtomicInteger();
+        // 全部探测结束时补一条汇总日志；直接用 countdown 而不是再起一个监控线程
+        java.util.concurrent.atomic.AtomicInteger remaining =
+                new java.util.concurrent.atomic.AtomicInteger(ids.size());
         for (String id : ids) {
-            try {
-                if (provisionService.probeOnly(id)) {
-                    online++;
+            deviceFanout.execute(() -> {
+                boolean acquired = false;
+                try {
+                    deviceFanoutPermits.acquire();
+                    acquired = true;
+                    if (provisionService.probeOnly(id)) {
+                        online.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception e) {
+                    // 单台设备探测失败不能影响其余设备
+                    log.debug("SDK 设备探测失败: {} {}", id, e.toString());
+                } finally {
+                    if (acquired) {
+                        deviceFanoutPermits.release();
+                    }
+                    if (remaining.decrementAndGet() == 0) {
+                        log.debug("SDK 设备巡检完成：{} / {} 在线", online.get(), ids.size());
+                    }
                 }
-            } catch (Exception e) {
-                // 单台设备探测失败不能影响其余设备
-                log.debug("SDK 设备探测失败: {} {}", id, e.toString());
-            }
+            });
         }
         if (!ids.isEmpty()) {
-            log.debug("SDK 设备巡检完成：{} / {} 在线", online, ids.size());
+            log.debug("SDK 设备巡检已下放 {} 台（并发上限 {}）", ids.size(), DEVICE_FANOUT_CONCURRENCY);
         }
     }
 
@@ -405,9 +457,18 @@ public class PlatformScheduler {
             return;
         }
         long now = System.currentTimeMillis();
-        for (String channelId : recordPolicy.enabledChannels()) {
+        /*
+         * 一次性把「该录的通道」全部查出来，而不是循环里逐条 findChannel。
+         *
+         * 原来是 N+1：200 路云端录像 = 每 30 秒 200 次单行查询，
+         * 且这 200 次都发生在同一个调度线程上，把其它定时任务往后顶。
+         * 换成一条 IN 查询后只剩 1 条 SQL（DeviceService 内部按 500 分批）。
+         */
+        java.util.Set<String> shouldRecord = recordPolicy.enabledChannels();
+        java.util.Map<String, GbChannel> channelMap = deviceService.channelsByIds(shouldRecord);
+        for (String channelId : shouldRecord) {
             try {
-                GbChannel ch = deviceService.findChannel(channelId);
+                GbChannel ch = channelMap.get(channelId);
                 if (ch == null || !ch.isOnline()) {
                     // 设备不在线：清掉计时，等它上线后从头开始算
                     negotiatingSince.remove(channelId);

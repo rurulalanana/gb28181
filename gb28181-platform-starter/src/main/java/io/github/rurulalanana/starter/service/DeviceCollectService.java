@@ -46,18 +46,18 @@ public class DeviceCollectService {
     private final RuntimeConfigService config;
 
     /**
-     * 采集下发专用线程池。
+     * 采集下发专用执行器：一个任务一个虚拟线程。
      *
      * <p>采集只做 SIP 下发、<b>不碰数据库</b>，但上千台设备同时上线时，
      * 若排在 {@link PlatformAsyncExecutor}（单线程串行落库）后面，
      * 会把设备注册、目录落库一起堵住——实测千台规模下目录应答被推迟 59 秒，
      * 表现为「设备都注册完了，这边还在慢慢建通道」。
+     *
+     * <p>早期这里是固定 4 个平台线程，千台设备集中重启时第四台之后都要排队。
+     * 虚拟线程没有这个上限，而且每条任务只是几次 SIP 报文发送，本身很轻。
      */
-    private final ExecutorService collectExecutor = Executors.newFixedThreadPool(4, r -> {
-        Thread t = new Thread(r, "gb28181-collect");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService collectExecutor = Executors.newThreadPerTaskExecutor(
+            Thread.ofVirtual().name("gb28181-collect-", 0).factory());
 
     /** 设备编号 → 最近一次采集时间戳（毫秒）。 */
     private final Map<String, Long> lastCollectAt = new ConcurrentHashMap<>();

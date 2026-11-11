@@ -191,6 +191,45 @@ public class DeviceService {
     }
 
     /**
+     * 批量按通道编码查询，返回 {@code 通道编码 → 通道}。
+     *
+     * <p><b>存在的意义是消除定时任务里的 N+1</b>：{@code PlatformScheduler#keepCloudRecordStreams}
+     * 原来对每个在录通道调用一次 {@link #findChannel(String)}，
+     * 两百路云端录像就是每分钟两百次单行查询；改成一次 {@code IN} 之后只剩一条 SQL。
+     *
+     * <p>分批是为了绕开 PostgreSQL 的绑定参数上限（65535）与过长的 SQL 文本：
+     * 每批 {@value #CHANNEL_LOOKUP_BATCH} 个，千级通道也只有几条语句。
+     *
+     * @param channelIds 通道编码集合；为空时返回空 Map（不查库）
+     */
+    public java.util.Map<String, GbChannel> channelsByIds(java.util.Collection<String> channelIds) {
+        if (channelIds == null || channelIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        java.util.List<String> ids = channelIds.stream()
+                .filter(id -> id != null && !id.isBlank())
+                .distinct()
+                .toList();
+        if (ids.isEmpty()) {
+            return java.util.Map.of();
+        }
+        java.util.Map<String, GbChannel> out = new java.util.HashMap<>(ids.size() * 2);
+        for (int from = 0; from < ids.size(); from += CHANNEL_LOOKUP_BATCH) {
+            java.util.List<String> batch = ids.subList(from,
+                    Math.min(from + CHANNEL_LOOKUP_BATCH, ids.size()));
+            for (GbChannel ch : channelMapper.selectList(Wrappers.<GbChannel>lambdaQuery()
+                    .in(GbChannel::getChannelId, batch))) {
+                // 通道编码跨设备可重复：保留先查到的一条，与 findChannel 的 limit 1 语义一致
+                out.putIfAbsent(ch.getChannelId(), ch);
+            }
+        }
+        return out;
+    }
+
+    /** {@link #channelsByIds} 的单批大小。 */
+    private static final int CHANNEL_LOOKUP_BATCH = 500;
+
+    /**
      * 由通道编码反查其所属设备编码：控制类命令的 {@code <DeviceID>} 是通道编码，
      * 而 SIP 的 {@code To}/{@code From}/请求行必须是设备编码。直连摄像机二者相同，级联则不同。
      */

@@ -52,21 +52,6 @@ public class DahuaProperties {
     private int rtspPort = 554;
 
     /**
-     * 设备 Web（HTTP CGI）端口，默认 80。
-     *
-     * <p><b>为什么需要它</b>：部分型号的<b>场景数组</b>类配置项
-     * （{@code VideoColor} / {@code VideoInSharpness} / {@code VideoInExposure} …）
-     * 通过 {@code CLIENT_SetNewDevConfig} 写不进去 —— 设备一律返回 {@code err=12}，
-     * 连原样写回都被拒；而设备自己的 Web 界面走
-     * {@code /cgi-bin/configManager.cgi?action=setConfig} 改得好好的。
-     *
-     * <p>所以参数写入在 SDK 被拒时会改走 CGI（见 {@code DahuaCgiAccess}）。
-     * 该端口与 SDK 端口（37777）和 RTSP 端口（554）是三个不同的东西。
-     * 设备改了 Web 端口时改这里。
-     */
-    private int httpPort = 80;
-
-    /**
      * 单台设备的通道总数。
      *
      * <p><b>为什么需要它</b>：大华的 RTSP 把子码流排在主码流之后

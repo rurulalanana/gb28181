@@ -22,13 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * <p>改造前这条路只有 CGI 一条，所以这种偏差不会有；现在多了 SDK 通路，
  * 这个测试就是两条通路「结果等价」的唯一保证。
  *
- * <p>对照的真实 CGI 输出（设备 {@code getConfig?name=PtzSpeed} 实测）：
+ * 对照的设备原始输出（{@code getConfig?name=PtzSpeed} 实测，已去掉 {@code table.} 前缀）：
  * <pre>
- *   table.PtzSpeed[0].PtzSpeed=3
- *   table.PtzSpeed[0].PatternSpeed=5
+ *   PtzSpeed[0].PtzSpeed=3
+ *   PtzSpeed[0].PatternSpeed=5
  * </pre>
- * 注意 {@code DahuaCgiAccess.read} 会剥掉 {@code table.} 前缀，
- * 所以最终键是 {@code PtzSpeed[0].PtzSpeed}。
  */
 class ConfigFlatTest {
 
