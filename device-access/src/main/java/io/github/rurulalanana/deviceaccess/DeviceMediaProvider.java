@@ -60,6 +60,21 @@ public interface DeviceMediaProvider {
     }
 
     /**
+     * 带宽限期的空闲回收。
+     *
+     * <p><b>为什么要传参</b>：宽限期是运行时配置（界面可热改）。
+     * 厂商实现自己读配置只能拿到启动快照，改了不生效 ——
+     * 表现为「国标流按新值释放、厂商流还是旧值」，看起来像厂商流没被回收。
+     *
+     * <p>默认实现转调 {@link #reapIdle()}，不关心宽限期的实现不用改。
+     *
+     * @param graceMs 宽限期（毫秒）；{@code <= 0} 表示由实现自选默认值
+     */
+    default void reapIdle(long graceMs) {
+        reapIdle();
+    }
+
+    /**
      * 一路已建立流的坐标。
      *
      * @param app       ZLM 应用名（通常等于设备编码）

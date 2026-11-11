@@ -517,16 +517,20 @@ public class PlatformScheduler {
             return;
         }
         try {
-            // 宽限期从运行时配置实时读取（不传的话 StreamService 会读启动快照，
-            // 导致界面上改大后仍按旧值提前关流）
-            int closed = streamService.reapIdleStreams(
-                    config.getLong(ConfigKeys.STREAM_NONE_READER_DELAY_MS));
+            /*
+             * 宽限期从运行时配置实时读取（不传的话 StreamService 会读启动快照，
+             * 导致界面上改大后仍按旧值提前关流）。
+             * 同一个值必须也传给厂商回收：国标流按新值释放、厂商流还按旧值，
+             * 表现为「大华的流怎么不释放」。
+             */
+            long grace = config.getLong(ConfigKeys.STREAM_NONE_READER_DELAY_MS);
+            int closed = streamService.reapIdleStreams(grace);
             if (closed > 0) {
                 log.info("空闲流巡检：已关闭 {} 路无观看者的流", closed);
             }
             // 厂商取流（SDK 裸流 / ISUP 推流）没有 RtpSession，上面那个循环扫不到，
             // 由各自的 provider 自行回收。集中在这里驱动，厂商不必自带 @Scheduled。
-            mediaRegistry.reapAll();
+            mediaRegistry.reapAll(grace);
         } catch (Exception e) {
             log.debug("空闲流巡检失败: {}", e.getMessage());
         }

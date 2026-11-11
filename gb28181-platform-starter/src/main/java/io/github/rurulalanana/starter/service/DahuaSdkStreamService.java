@@ -42,6 +42,8 @@ public class DahuaSdkStreamService {
     private final DeviceService deviceService;
     private final Gb28181MediaPlatform platform;
     private final DahuaProperties props;
+    /** 常开判定，与国标链路的空闲巡检共用同一份策略。 */
+    private final StreamKeepAlive streamKeepAlive;
 
     /** 一路 SDK 取流：SDK 句柄 + ZLM 发布器。 */
     public record LiveStream(String key, String app, String stream,
@@ -272,6 +274,16 @@ public class DahuaSdkStreamService {
      * {@code DeviceMediaProvider.reapIdle()} 统一驱动，厂商不必各自声明定时任务。
      */
     public void reapIdleStreams() {
+        reapIdleStreams(0);
+    }
+
+    /**
+     * 带指定宽限期的空闲回收。
+     *
+     * @param graceMs 宽限期（毫秒），与国标链路共用运行时配置；
+     *                {@code <= 0} 时用本类默认值
+     */
+    public void reapIdleStreams(long graceMs) {
         if (running.isEmpty()) {
             return;
         }
@@ -279,13 +291,21 @@ public class DahuaSdkStreamService {
         if (media == null) {
             return;
         }
+        // 下限 20 秒：浏览器从点播到真正建立拉流要 1~3 秒，再快会误杀刚打开的页面
+        long grace = graceMs > 0 ? Math.max(20_000L, graceMs) : IDLE_GRACE_MS;
+        /*
+         * 常开判定必须与国标链路共用同一份策略（录像中 / on_demand=false / 正在视觉检测）。
+         * 早先这里只看 on_demand，结果正在录或正在做 AI 检测的 SDK 流被当成无人观看回收，
+         * 视觉侧发现流没了又立刻重拉 —— 日志里表现为「回收后十几秒又被启动」的反复起停。
+         */
+        java.util.Set<String> keepAlive = streamKeepAlive.channelsRequiringStream();
         long now = System.currentTimeMillis();
         for (Map.Entry<String, LiveStream> e : running.entrySet()) {
             String key = e.getKey();
             LiveStream live = e.getValue();
             try {
                 /*
-                 * 常开通道不回收：录像录制中的流由 ZLM 的录制定时器维持读者数，
+                 * 先看读者数再查开关：常开通道的流由 ZLM 的录制定时器维持读者数，
                  * 但「只开常开、不录像」的通道没有读者也要一直在线。
                  * 查库有成本，所以先用内存里的 readers 判，只有 0 读者才去查开关。
                  */
@@ -294,8 +314,8 @@ public class DahuaSdkStreamService {
                     lastViewerAt.put(key, now);
                     continue;
                 }
-                if (isKeepAliveChannel(live.app(), live.stream())) {
-                    // 常开：不回收，但要持续刷新时间戳，避免关掉开关后立刻被判超时
+                if (keepAlive.contains(live.stream())) {
+                    // 常开/录制中/检测中：不回收，但要持续刷新时间戳，避免条件解除后立刻被判超时
                     lastViewerAt.put(key, now);
                     continue;
                 }
@@ -306,8 +326,8 @@ public class DahuaSdkStreamService {
                     continue;
                 }
                 // 设备断线（SDK 回调停了）也要回收：地址还在但永远没新帧
-                boolean stalled = now - live.publisher().lastFrameAt() > IDLE_GRACE_MS;
-                if (now - seen >= IDLE_GRACE_MS || stalled) {
+                boolean stalled = now - live.publisher().lastFrameAt() > grace;
+                if (now - seen >= grace || stalled) {
                     log.info("回收空闲的大华 SDK 流: {}（{} 秒无观众{}）", key,
                             (now - seen) / 1000, stalled ? "，且已无新帧" : "");
                     stop(key);
@@ -315,22 +335,6 @@ public class DahuaSdkStreamService {
             } catch (Exception ex) {
                 log.debug("回收 SDK 流失败: {} {}", key, ex.toString());
             }
-        }
-    }
-
-    /**
-     * 该通道是否要求流常开（{@code on_demand = false}）。
-     *
-     * <p>查库失败时返回 {@code false}（按按需处理）：宁可多回收一次，
-     * 也不要因为一次数据库抖动把「按需」通道永久占着设备上行。
-     */
-    private boolean isKeepAliveChannel(String deviceId, String channelId) {
-        try {
-            var ch = deviceService.findChannel(deviceId, channelId);
-            return ch != null && Boolean.FALSE.equals(ch.getOnDemand());
-        } catch (Exception e) {
-            log.debug("读取通道按需设置失败（按按需处理）: {}/{} {}", deviceId, channelId, e.toString());
-            return false;
         }
     }
 }

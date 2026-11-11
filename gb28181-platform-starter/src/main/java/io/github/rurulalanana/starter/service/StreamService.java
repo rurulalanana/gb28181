@@ -48,13 +48,6 @@ public class StreamService {
     private final SipRegistryHealer registryHealer;
 
     /**
-     * 「此刻是否应该录」的权威判定（用户开关 ∪ 录像计划）。
-     * 空闲流回收不能直接读 {@code gb_channel.cloud_record}：录像计划不写库，
-     * 只读库会把「计划刚开录」的流当成无读者回收掉。
-     */
-    private final ChannelRecordPolicy recordPolicy;
-
-    /**
      * 各通道上一次点播用的码流编号。
      *
      * <p><b>为什么需要单独记</b>：码流编号是 INVITE 时写进 SSRC 后 4 位的，
@@ -79,21 +72,8 @@ public class StreamService {
     /** 非国标设备的取流实现（SDK 裸流 / ISUP 推流 / RTSP 代理）。 */
     private final DeviceMediaRegistry mediaRegistry;
 
-    /**
-     * 视觉检测服务（可选）。
-     *
-     * <p><b>用 {@code ObjectProvider} 而不是直接注入</b>：
-     * {@code VisionService} 反过来要调本类的 {@code startLive} / {@code session}，
-     * 直接互注会造成循环依赖；且视觉模块可能未启用（{@code vision.enabled=false}），
-     * 延迟解析能在未启用时安全地拿到空值。
-     *
-     * <p><b>为什么需要它</b>：视觉检测靠 ffmpeg 拉 TS 流工作，
-     * 但那条连接不算 ZLM 的「读者」。不把正在检测的通道并进常开集合，
-     * 空闲流巡检会在 45 秒后把流当「无人观看」关掉 ——
-     * 表现为「检测刚开起来好好的，一分钟后自己停了」。
-     */
-    private final org.springframework.beans.factory.ObjectProvider<
-            io.github.rurulalanana.starter.service.vision.VisionService> visionProvider;
+    /** 常开判定（录像中 / on_demand=false / 正在视觉检测），与厂商取流回收共用。 */
+    private final StreamKeepAlive streamKeepAlive;
 
     // ==================== 点播 ====================
 
@@ -1148,7 +1128,7 @@ public class StreamService {
         long now = System.currentTimeMillis();
         // 一次性取出「要求常开推流」的通道，避免在循环里逐个查库。
         // 每 20 秒跑一次 × 通道数 次查询是纯浪费，一次全量反而更划算。
-        java.util.Set<String> keepAlive = channelsRequiringStream();
+        java.util.Set<String> keepAlive = streamKeepAlive.channelsRequiringStream();
         int closed = 0;
         for (RtpSession session : sessions.sessions()) {
             try {
@@ -1207,47 +1187,6 @@ public class StreamService {
             }
         }
         return closed;
-    }
-
-    /**
-     * 找出「要求流常开、不能被空闲回收」的通道编码集合：
-     * 应录云端录像（用户开关 ∪ 录像计划，判定走 {@link ChannelRecordPolicy#enabledChannels()}）
-     * 与用户显式设成常开（{@code on_demand=false}）两类。
-     * 录像判定必须走 recordPolicy：录像计划不写库，只读库会让计划刚开录的流被回收。
-     * 一次全量查库优于循环里 N 次单条查询（每 20 秒调用一次）；查库失败返回空集合，退化为全部按需。
-     */
-    private java.util.Set<String> channelsRequiringStream() {
-        try {
-            java.util.Set<String> out = new java.util.HashSet<>();
-            // 1. 应录通道（用户开关 ∪ 录像计划，纯内存，不查库）
-            if (recordPolicy != null && recordPolicy.isLoaded()) {
-                out.addAll(recordPolicy.enabledChannels());
-            }
-            // 2. 用户显式设成常开的通道（读库）
-            for (GbChannel ch : deviceService.allChannels()) {
-                if (ch.getChannelId() == null) {
-                    continue;
-                }
-                if (Boolean.FALSE.equals(ch.getOnDemand())) {
-                    out.add(ch.getChannelId());
-                }
-            }
-            /*
-             * 3. 正在做视觉检测的通道。
-             * 视觉取帧是 ffmpeg 从 HTTP-TS 拉流，ZLM 不把这条连接算作读者，
-             * 所以不加这一段的话，检测流会被本巡检当成「无人观看」关掉，
-             * 表现为检测跑一会儿就静默停了（inferredFrames 不再增长）。
-             */
-            io.github.rurulalanana.starter.service.vision.VisionService vision =
-                    visionProvider.getIfAvailable();
-            if (vision != null) {
-                out.addAll(vision.runningChannelIds());
-            }
-            return out;
-        } catch (Exception e) {
-            log.debug("读取常开通道失败（本次按全部按需处理）: {}", e.getMessage());
-            return java.util.Set.of();
-        }
     }
 
     /**

@@ -60,14 +60,22 @@ public class DeviceMediaRegistry {
      *
      * <p>厂商取流没有 RtpSession，平台那个按会话的巡检扫不到它们，
      * 所以由调度器统一驱动 —— 厂商不必自带 {@code @Scheduled}。
+     *
+     * @param graceMs 宽限期（毫秒），与国标链路用同一个运行时配置；
+     *                {@code <= 0} 表示由各实现自选默认值
      */
-    public void reapAll() {
+    public void reapAll(long graceMs) {
         for (DeviceMediaProvider p : index.values()) {
             try {
-                p.reapIdle();
+                p.reapIdle(graceMs);
             } catch (Exception e) {
                 log.debug("取流回收失败（{}）: {}", p.kind().code(), e.getMessage());
             }
         }
+    }
+
+    /** 用实现自选的宽限期做一次回收。 */
+    public void reapAll() {
+        reapAll(0);
     }
 }
