@@ -447,8 +447,17 @@ async function loadChannelMeta() {
     const map = new Map()
     for (const c of list) {
       map.set(metaKey(c.deviceId || c.serial, c.id || c.channelId), {
-        name: c.name,
-        online: !!c.online
+        // 优先自定义名：用户改过名字后应显示改过的那个
+        name: c.customName || c.name,
+        /*
+         * 两个字段语义不同，都必须看：
+         *   · deviceOnline —— 设备是否注册在线（ChannelVo 里没有 online 字段，
+         *     写成 c.online 会拿到 undefined，所有通道一律显示「离线」）；
+         *   · status       —— 设备目录上报的通道状态（ON/OFF）。
+         * 实测两者会不一致：设备在线但某通道 Status=OFF 的情况真实存在，
+         * 这种通道加上去也拉不到流。status 缺失（设备不报）时不据此判离线。
+         */
+        online: !!c.deviceOnline && c.status !== 'OFF'
       })
     }
     channelMeta.value = map
@@ -543,13 +552,19 @@ async function openPicker() {
   pickerDialog.value = true
   pickerQuery.value = ''
   picked.value = []
-  if (!channelMeta.value.size) {
-    pickerLoading.value = true
+  const firstTime = !channelMeta.value.size
+  pickerLoading.value = true
+  try {
+    /*
+     * 每次打开都重取，不能只在首次加载：
+     * 在线状态是易变数据，缓存会让「设备已上线」仍显示离线、或「已离线」仍可勾选。
+     */
     await loadChannelMeta()
+  } finally {
     pickerLoading.value = false
-    // 名称补上后要重算主表展示
-    await load()
   }
+  // 首次拿到名称后重算主表展示（之后名称没变，不必重拉 vision 列表）
+  if (firstTime) await load()
 }
 
 async function savePicked() {
