@@ -1012,6 +1012,14 @@ public class StreamService {
     private static final int MAX_STALE_RELEASE = 50;
 
     /**
+     * SDK 流判「僵尸」前必须已存在多少秒。
+     *
+     * <p>新建的流不能立刻用「ZLM 有无视频轨」判活：发布器就绪与 ZLM 注册轨道之间
+     * 有短暂间隙，不设宽限会把刚点播的流误标 CLOSED（界面表现为推流数刚起来就变 0）。
+     */
+    private static final int SDK_ZOMBIE_GRACE_SEC = 60;
+
+    /**
      * 为上一轮运行遗留的对话补发 BYE，释放设备侧仍在进行的推流。
      * 进程被强杀时来不及发 BYE，设备 / 下级平台会一直推 —— 实测 LiveGBS 每路约 3 Mbps 且从不超时，
      * 多重启几次就攒成多路重复推流。平台侧已无对话信息，只能靠库里持久化的 Call-ID 补发；
@@ -1276,6 +1284,10 @@ public class StreamService {
      *
      * <p>只对 {@code transport=SDK} 生效：国标流的 {@code NEGOTIATING} 是「等设备恢复」的
      * 正常中间态，此时 ZLM 里本来就可能还没有轨道，不能当僵尸处理。
+     *
+     * <p><b>新建的流有宽限期</b>：`videoCodecName` 反映的是 ZLM 侧轨道状态，
+     * 流刚建好时可能还查不到（发布器就绪 ≠ ZLM 已注册视频轨），
+     * 不设宽限就会把刚点播的流误标 CLOSED —— 表现为「刚播起来推流数就变 0」。
      */
     private List<GbStream> liveRowsNotIn(java.util.Set<String> skip) {
         try {
@@ -1284,12 +1296,14 @@ public class StreamService {
                     .ne(GbStream::getState, GbStream.STATE_CLOSED)
                     .orderByDesc(GbStream::getStartTime));
             ZlmMediaServer media = platform.mediaServer();
+            LocalDateTime zombieCutoff = LocalDateTime.now().minusSeconds(SDK_ZOMBIE_GRACE_SEC);
             List<GbStream> out = new ArrayList<>();
             for (GbStream r : rows) {
                 if (skip.contains(r.getStreamKey())) {
                     continue;
                 }
                 if (TRANSPORT_SDK.equalsIgnoreCase(r.getTransport()) && media != null
+                        && r.getStartTime() != null && r.getStartTime().isBefore(zombieCutoff)
                         && media.videoCodecName(r.getApp(), r.getStreamName()) == null) {
                     r.setState(GbStream.STATE_CLOSED);
                     r.setUpdateTime(LocalDateTime.now());
@@ -1405,9 +1419,16 @@ public class StreamService {
         return platform.mediaServer() != null;
     }
 
-    /** 当前会话数。 */
-    public int sessionCount() {
-        return platform.sessionManager() == null ? 0 : platform.sessionManager().sessionCount();
+    /**
+     * 当前正在推流的数量（国标会话 + SDK 直连流）。
+     *
+     * <p><b>不能只数 {@code RtpSession}</b>：SDK 直连设备（大华裸流 / RTSP 代理）
+     * 由平台自己发布或由 ZLM 反向拉流，没有会话对象 —— 只数会话会让
+     * 「当前推流」在只播大华通道时恒为 0。判据统一走 {@link #liveList()}，
+     * 与「推流列表」保持同一口径，避免两个接口给出矛盾的数字。
+     */
+    public int liveStreamCount() {
+        return liveList().size();
     }
 
     /** 媒体服务。 */

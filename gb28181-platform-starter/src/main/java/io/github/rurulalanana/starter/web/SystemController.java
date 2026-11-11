@@ -221,7 +221,7 @@ public class SystemController {
         vo.setChannelTotal(channelStats[0]);
         vo.setChannelOnline(channelStats[1]);
         vo.setChannelCount(channelStats[0]);
-        vo.setStreamCount(streamService.sessionCount());
+        vo.setStreamCount(streamService.liveStreamCount());
         vo.setPlatformId(props.getPlatformId());
         vo.setPreferStreamFmt("webrtc");
         vo.setVersionType("open-source");
