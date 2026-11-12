@@ -484,7 +484,12 @@ const nowTick = ref(Date.now())
 /** nowTick 的定时器句柄。 */
 let nowTimer = null
 
-/** 时间轴点击：同段 → 定位（SIP INFO npt，毫秒级、不断流）；异段或未播 → 从该时刻起播。 */
+/**
+ * 时间轴点击：命中当前正在播的段 → 定位到该时刻；命中别的段或未起播 → 从该时刻起播。
+ *
+ * <p>两条路最终都变成「停会话 + 按新起点重新 INVITE」（见 {@link #flushSeek}），
+ * 区别只是同段时不需要重建 tab / 重新选通道。
+ */
 function onTrackClick(ev) {
   const base = dayStartMs.value
   if (base === null) return
@@ -499,8 +504,9 @@ function onTrackClick(ev) {
   }
   const offset = Math.floor((point.at - parseWall(hit.row.startTime)) / 1000)
   /*
-   * 同段就走定位，条件里不能带 playing.value：缓冲/重连时它并非 true，
-   * 会掉进下面的 play() → stop + 重新 INVITE，用户看到「拖一下整路重来」。
+   * 同段走 seekTo（带防抖），条件里不能带 playing.value：缓冲/重连时它并非 true，
+   * 会掉进下面的 play() —— 那会重新请求 playback/start，丢掉防抖后连拖多次就变成
+   * 多次并发重建会话。
    */
   if (current.value && hit.row === current.value) {
     seekTo(Math.max(0, offset))
@@ -696,8 +702,11 @@ async function play(row, opts = {}) {
     seekTimer = null
   }
   pendingSeek = null
-  clearSeeking()
-  clearSeekFallback()
+  /*
+   * 不在开头清「定位中」：它由 {@link #restartAt} 负责起止。
+   * 重新 INVITE 要 2~3 秒，遮罩留在起播完成前才符合用户预期
+   * （拖动后盖一下「定位中…」，画面出来就消失）。
+   */
   await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
@@ -708,8 +717,7 @@ async function play(row, opts = {}) {
   /*
    * 优先 WebRTC，退回 WS-FLV。不走纯 FLV：video.js 9 + videojs-flvjs 的 flv 源
    * 处理器注册不全，Html5.canPlayType() 会抛异常，被判成「不支持的类型」后
-   * 起播看门狗反复重拉（表现为一直转圈）。WebRTC 还由 ZLM 连续重打时间戳，
-   * npt 跳转不会像 FLV 那样在 MSE 里留下缓冲空洞。
+   * 起播看门狗反复重拉（表现为一直转圈）。
    */
   const playbackProto = urls.webrtc ? 'webrtc' : 'wsflv'
   await player.play(playbackKey.value, urls, {
@@ -724,20 +732,24 @@ async function play(row, opts = {}) {
     onStall: rebuildStream,
     // 稳定播放 10 秒后归还重拉预算，否则几次无关的起播故障会把 2 次预算永久耗光
     onStable: () => { stallRetry = 0 },
-    // 官方控件动作 → 国标 SIP 指令（INFO 定位 / PLAY / PAUSE / Scale）
+    // 官方控件动作 → 国标 SIP 指令（定位 = 重新 INVITE；暂停/续播/倍速走 INFO）
     vod: {
       duration: segmentSeconds.value,
       onSeek: (sec) => seekTo(sec),
       onPause: () => control('pause'),
       onResume: () => resumePlayback(),
       onRate: (rate) => control('scale', { scale: rate }),
-      // 媒体时间轴突变：段内位置 = positionOffset + 媒体时间，媒体自己跳了 N 秒就
-      // 要把 offset 反向退掉 N 秒，否则跳转被计入两次，进度条与画面对不上
+      /*
+       * 媒体时间轴突变校正：段内位置 = positionOffset + 媒体时间，
+       * 媒体自己跳了 N 秒就要把 offset 反向退掉 N 秒，否则跳转被计入两次。
+       *
+       * <p>现在定位统一走重新 INVITE（见 {@link #flushSeek}），主动 seek 不会再改 offset；
+       * 这里保留是为了应付「设备自己跳了一段」（推流端重启、流异常重推）——
+       * 那种情况下时间轴会突然前移，不退 offset 就会与画面对不上。
+       */
       onJump: (delta) => {
-        positionOffset.value = (positionOffset.value || 0) - delta
-        // 媒体时间轴已经跳到新位置，说明设备执行完了，不用再走兜底
+        positionOffset.value = Math.max(0, (positionOffset.value || 0) - delta)
         clearSeeking()
-        clearSeekFallback()
       }
     }
   })
@@ -762,14 +774,12 @@ function addSeconds(timeStr, seconds) {
 }
 
 /**
- * 拖动/点击定位：发 SIP INFO（Range: npt=<秒>-）让设备原地跳，配 200ms 防抖。
+ * 拖动/点击定位入口（带 200ms 防抖）。
  *
- * 实测证据：同一次会话发 Range: npt=3600-，画面 OSD 从 00:00:17 跳到 01:00:18。
- * 曾误判为「设备不支持 npt」改成停流重开，真因是 INFO 的 From/To tag 取反、
- * 报文落在对话框之外，设备回 200 OK 却不执行。
+ * <p>防抖是必需的：拖动会连续触发，每次都重建会话的话，设备侧会被连环
+ * INVITE/BYE 涗刷，ZLM 媒体源反复销毁重建，反而更慢。
  *
- * 防抖：拖动会连续触发，设备每秒只处理几条，多余指令会排队或被丢弃。
- * 失败只如实提示，不再自动重拉 —— 不支持 npt 时重拉也定位不到目标。
+ * <p>具体怎么定位（为什么不用 npt）见 {@link #flushSeek}。
  */
 let seekTimer = null
 let pendingSeek = null
@@ -788,9 +798,6 @@ function seekTo(sec) {
 const seeking = ref(false)
 let seekingTimer = null
 
-/** npt 定位的兜底定时器（超时未跳就退回「停会话 + 重新 INVITE」）。 */
-let seekFallbackTimer = null
-
 function clearSeeking() {
   if (seekingTimer) {
     clearTimeout(seekingTimer)
@@ -799,67 +806,73 @@ function clearSeeking() {
   seeking.value = false
 }
 
-function clearSeekFallback() {
-  if (seekFallbackTimer) {
-    clearTimeout(seekFallbackTimer)
-    seekFallbackTimer = null
-  }
+/**
+ * 真正执行定位：<b>停会话 + 按新起点重新 INVITE</b>。
+ *
+ * <h3>为什么不用 SIP INFO 的 npt 跳转（实测结论，别改回去）</h3>
+ * npt 快路径曾经实现过（commit 8990ac0），设备也确实认：
+ * 2026-11-12 实测 34020000002000000006 / 34020000001310000001，
+ * 从 03:00:10 发 {@code Range: npt=1800} 后，抓帧看到的 OSD 变成
+ * {@code 03:30:06} —— 画面**确实跳了**。但界面上依然是「拖不准」：
+ *
+ * <ol>
+ *   <li><b>进度条会算偏</b>：{@code positionOffset} 只能用「发指令那一刻」的
+ *       媒体时间轴反算（{@code offset - mediaPos}），而设备执行有 1~2 秒延迟，
+ *       这段时间媒体还在往前跑，偏差 = 执行延迟。每拖一次累一次，
+ *       最后就是「播放头在 03:49、画面 OSD 还在 03:39」。</li>
+ *   <li><b>媒体时间轴不保证反映跳转</b>：回放优先走 WebRTC，而 MediaStream 的
+ *       {@code <video>.currentTime} 是「已播放时长」，不跟着源 PTS 跳变。
+ *       于是 {@code onJump} 靠不住，也没有任何可靠的「跳转已完成」信号可以
+ *       用来重新对齐进度条。</li>
+ * </ol>
+ *
+ * <h3>为什么重新 INVITE 是精准的</h3>
+ * INVITE 的 {@code t=} 是<b>绝对时间</b>，设备从那一刻开始推流，
+ * {@code positionOffset} 直接等于目标偏移，不存在任何需要推算的量，
+ * 误差为零。跨段拖动一直走的就是这条路，用户也认可它的准确度。
+ * 代价是 2~3 秒黑屏（重新应答 INVITE + 等关键帧）。
+ *
+ * <p>精准优先于速度：回放的核心操作就是反复拖时间轴找位置，
+ * 「拖了不准」比「拖了等两秒」严重得多。
+ */
+async function flushSeek(offset) {
+  pendingSeek = null
+  clearSeeking()
+  await restartAt(offset)
 }
 
 /**
- * 定位兜底：npt 是「请设备跳」，设备可以不理。6 秒内媒体时间轴没跳变就退回
- * WVP 的做法（停会话 + 按新起点重新 INVITE，代价 2~3 秒黑屏）。
+ * 兜底重启的序号：拖动会连续触发，而 restartAt 要 2~3 秒。
+ *
+ * <p>不丢弃过期请求的话，用户快速连拖两次会有两个 restartAt 并发跑：
+ * 第一个的 stop 会把第二个刚建好的会话停掉，表现为「拖了反而没画面」。
+ * 只保留最后一次 —— 与用户预期一致（他要的是最后落点的画面）。
  */
-function armSeekFallback(offset) {
-  clearSeekFallback()
-  const base = player.position.value || 0
-  seekFallbackTimer = setTimeout(() => {
-    seekFallbackTimer = null
-    if (!current.value) return
-    const moved = Math.abs((player.position.value || 0) - base)
-    // 时间轴已经跳了（或本来就是同一位置），说明 npt 生效
-    if (moved > 3) return
-    clearSeeking()
-    restartAt(offset)
-  }, 6000)
-}
+let seekRestartSeq = 0
 
-/** 真正发出定位指令，并把本地进度条挪到目标位置。 */
-async function flushSeek(offset) {
-  pendingSeek = null
-  try {
-    await playbackApi.control({
-      streamid: playbackKey.value,
-      serial: serial.value,
-      code: code.value,
-      command: 'seek',
-      range: offset
-    })
-    // 乐观挪动进度：设备跳转后媒体时间轴不重置，段内位置 = 偏移 + 媒体已播秒数。
-    // 把偏移改成「目标 - 当前」，否则进度条弹回原处，用户以为没生效（画面其实跳了）
-    positionOffset.value = Math.max(0, offset - (player.position.value || 0))
-    // 设备跳转有 1~2 秒处理时间，期间盖「定位中…」；媒体时间轴一跳就撤掉
-    clearSeeking()
-    seeking.value = true
-    seekingTimer = setTimeout(clearSeeking, 3000)
-    armSeekFallback(offset)
-  } catch (e) {
-    clearSeeking()
-    clearSeekFallback()
-    ElMessage.warning(e.message || '定位失败：该设备可能不支持 npt 跳转')
-  }
-}
-
-/** 从本段第 offsetSeconds 秒重新开始播放（停会话 → 重新 INVITE）。只作兜底用。 */
+/**
+ * 从本段第 offsetSeconds 秒重新开始播放（停会话 → 重新 INVITE）。
+ *
+ * <p>既是拖动定位的主路径（见 {@link #flushSeek}），也是画面卡死自愈的手段。
+ */
 async function restartAt(offsetSeconds) {
   const row = current.value
   if (!row) return
+  const seq = ++seekRestartSeq
+  // 重新 INVITE 要 2~3 秒黑屏，盖一层「定位中…」避免用户以为没反应
+  seeking.value = true
   try {
     await playbackApi.stop({ serial: serial.value, code: code.value })
   } catch (e) {
     // 会话可能已不存在（设备已 BYE），继续重开即可
   }
+  // stop 期间用户又拖了：这次已经过期，直接放弃（新的那次会自己重建）
+  if (seq !== seekRestartSeq) {
+    clearSeeking()
+    return
+  }
   await play(row, { rebuild: true, startOffset: offsetSeconds })
+  clearSeeking()
 }
 
 /** 重拉整条回放流。只在媒体源丢了视频轨、或连上却收不到字节时调用 —— 重连 WebSocket 没用。 */
@@ -1176,7 +1189,6 @@ onUnmounted(() => {
   }
   pendingSeek = null
   clearSeeking()
-  clearSeekFallback()
   releasePlayback()
 })
 </script>
@@ -1414,7 +1426,7 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-/* 国标定位是让设备跳，1~2 秒画面纹丝不动，不提示会被当成卡死。 */
+/* 重新 INVITE 定位要 2~3 秒（设备重新应答 + 等关键帧），不提示会被当成卡死。 */
 .pb-seeking {
   position: absolute;
   top: 10px;
