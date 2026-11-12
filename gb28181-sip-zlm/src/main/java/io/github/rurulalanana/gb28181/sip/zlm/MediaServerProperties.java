@@ -276,21 +276,32 @@ public class MediaServerProperties {
      * <pre>如果流只有单Track，最多等待若干毫秒，超时后未收到其他Track的数据，
      *则认为是单Track。如果协议元数据有声明特定track数，那么无此等待时间。</pre>
      *
-     * <p><b>为什么默认 3 秒对国标设备不够</b>：GB28181 的 PS 封装常常先把
-     * 音频包送上来、视频 I 帧晚几秒才到。3 秒一到，ZLM 认为「这就是单轨流」，
-     * 后续到达的视频轨只能一直处于<b>未就绪</b>状态，最终在
-     * {@link #waitTrackReadyMs} 超时后被永久丢弃：
-     * <pre>Got track: H264
-     *Got track: PCMA
-     *(3 秒后 ZLM 认定单轨，开始正常出音频)
-     *(30 秒后) Track not ready for a long time, ignored: H264</pre>
-     * 现象就是「有声音没画面」，且重连播放器完全无效 —— 媒体源里已经没有视频轨了。
+     * <p>曾为了防「有声音没画面」把它加到 10 秒：GB28181 的 PS 封装理论上可能
+     * 先把音频送上来、视频 I 帧晚几秒才到，3 秒一到 ZLM 就认定单轨，
+     * 后到的视频轨会在 {@link #waitTrackReadyMs} 超时后被永久丢弃
+     * （{@code Track not ready for a long time, ignored: H264}）。
      *
-     * <p>提到 10 秒与 {@link #waitTrackReadyMs} 配合：先给视频轨足够时间加入，
-     * 真的不来再按单轨处理，不至于白等到 30 秒。
+     * <h3>为什么又改回 3 秒（2026-11-12 实测）</h3>
+     * 那 10 秒是<b>每次都付</b>的固定代价，而且绝大多数时候白付：
+     * 同一次回放的日志显示两条轨在<b>同一毫秒</b>就绪，根本不需要等：
+     * <pre>
+     *   14:04:11.238  Got track: H264
+     *   14:04:11.238  Got track: PCMA
+     *   14:04:11.238  Add track finished
+     * </pre>
+     * 且整份日志里 {@code Track not ready} 出现 <b>0 次</b> ——
+     * 说明「视频轨晚到」这个场景在这批设备上从未发生。
+     *
+     * <p>而用户感受到的是「切换时间点黑屏太久」：拖动一次完整耗时约 13 秒，
+     * 其中 INVITE 应答到流上线这 <b>9 秒</b>几乎全耗在这个等待上。
+     *
+     * <p>取 3000ms（ZLM 默认）：保留原有的单轨保护能力，
+     * 又不会让双轨流白等 7 秒。若将来某台设备真的视频晚到，
+     * 调整这里即可 —— 但请先用日志确认 {@code Got track} 两行的时间差，
+     * 不要凭猜测调大。
      */
     @Builder.Default
-    private final int waitAddTrackMs = 10000;
+    private final int waitAddTrackMs = 3000;
 
     /** ZLM 虚拟主机名（默认虚拟主机）。 */
     @Builder.Default

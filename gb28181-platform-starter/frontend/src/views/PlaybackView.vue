@@ -743,10 +743,14 @@ async function play(row, opts = {}) {
        * 媒体时间轴突变校正：段内位置 = positionOffset + 媒体时间，
        * 媒体自己跳了 N 秒就要把 offset 反向退掉 N 秒，否则跳转被计入两次。
        *
-       * <p><b>只校正「前移」（delta &gt; 0）。</b>时间轴变小只可能发生在重新 INVITE
-       * 换流的时候（新 MediaStream 的 currentTime 从 0 开始），而那时
-       * positionOffset 已按 INVITE 的 {@code t=} 设好，再退一次反而把进度条推到更晚，
-       * 表现就是「拖了位置又不对」。
+       * <p><b>补偿只对「前移」（delta &gt; 0）做。</b>时间轴变小只可能发生在
+       * 重新 INVITE 换流的时候（新 MediaStream 的 currentTime 从 0 开始），
+       * 那时 positionOffset 已按 INVITE 的 {@code t=} 设好，再退一次反而把进度条推到更晚。
+       *
+       * <p><b>但撤「定位中」要无条件做</b>：换流正是 delta &lt; 0 的场景，
+       * 早先把 clearSeeking 写在上面的 if 里，结果遮罩永远不消失
+       * （画面已经恢复、右上角还挂着「定位中…」）。
+       * 时间轴一旦开始变化就说明新流已经有数据，遮罩的使命就结束了。
        */
       onJump: (delta) => {
         if (delta > 0) {
@@ -764,6 +768,16 @@ async function play(row, opts = {}) {
   if (playRate.value !== 1) {
     await control('scale', { scale: playRate.value })
   }
+  /*
+   * 起播完成就撤「定位中」。
+   *
+   * <p>不能只依赖 {@code onJump}：它要等媒体时间轴突变 &gt; 3 秒才触发，
+   * 而从段起点起播、或新流前几秒变化很小时都不满足，
+   * 遮罩会一直挂到 {@code restartAt} 的 finally ——
+   * 但走 {@code play()}（换段 / 首次点播）时根本没人清，画面恢复了遮罩还在。
+   * 这里无条件清一次，配合 restartAt 的清理构成兜底。
+   */
+  clearSeeking()
 }
 
 /** 把 {"YYYY-MM-DDTHH:mm:ss"} 加上若干秒，返回同格式字符串。 */
