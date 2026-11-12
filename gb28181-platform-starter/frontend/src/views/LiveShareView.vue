@@ -248,7 +248,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useLivePlayer } from '@/composables/useLivePlayer'
-import { resolvePlayUrls, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileClient } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileClient } from '@/player/resolvePlayUrls'
 
 /**
  * 直播分享页（免登录）。
@@ -550,16 +550,22 @@ async function play() {
     { flv: data.flv, wsFlv: data.wsFlv, hls: data.hls, rtmp: data.rtmp, rtsp: data.rtsp },
     0
   )
-  if (!urls.wsFlv && !urls.httpFlv && !urls.hls) {
+  /*
+   * 地址校验与其他视图同一口径（hasPlayUrl）：只要有一路可用就往下走。
+   * 早先这里写成「wsFlv/httpFlv/hls 都没有就报错」，忘了 WebRTC ——
+   * 手机端固定走 WebRTC，恰好没有 FLV/HLS 时就会误报「拿不到播放地址」。
+   */
+  const phone = isMobileClient()
+  const wantedProto = phone ? LIVE_DEFAULT_PROTOCOL : proto.value
+  if (!hasPlayUrl(wantedProto, urls)) {
     notice.value = notice.value || '暂时拿不到播放地址，请稍后重试'
     return
   }
   notice.value = ''
-  const phone = isMobileClient()
   await player.play(`${data.deviceId}/${data.channelId}`, urls, {
     // 手机固定 WebRTC：FLV 无可用 MSE，HLS 延迟 6s+ 且非 Safari 解不了 G.711，
     // 给三个选项只会让人点到必然失败的那个。详见 isMobileClient 的注释。
-    proto: phone ? LIVE_DEFAULT_PROTOCOL : proto.value,
+    proto: wantedProto,
     // 协议切换按钮仅桌面端：手机上的可选项本身就不靠谱，按钮只会变成「点了就黑屏」的陷阱
     controlButtons: phone
       ? null
@@ -575,7 +581,12 @@ async function play() {
       }
     },
     onFatal: (msg) => { notice.value = msg || '播放失败' },
-    // 文案按端区分：手机上不能换协议，让它去换只会白试
+    /*
+     * 文案按端区分：手机上不能换协议，让它去换只会白试。
+     *
+     * 分享页不自动重建会话（它没有 stop 接口的权限口径，且访客没有登录态，
+     * 重建会因鉴权失败），所以这里只给提示，不调 stall.handleStall。
+     */
     onStall: () => {
       notice.value = phone
         ? '画面未就绪，请检查手机网络后刷新重试'

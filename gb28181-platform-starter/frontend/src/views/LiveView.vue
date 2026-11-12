@@ -311,6 +311,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, controlApi, visionApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
+import { useStreamPlayback } from '@/composables/useStreamPlayback'
 import { useVision } from '@/composables/useVision'
 import PtzPanel from '@/components/PtzPanel.vue'
 import TrackBox from '@/components/TrackBox.vue'
@@ -800,6 +801,19 @@ function applyChannel(tile, channel) {
   tile.source = channel.source || ''
 }
 
+/**
+ * 单格「有数据但无画面」的自愈，按格子 id 分开计预算。
+ *
+ * <p>逻辑已抽到 {@link useStreamPlayback}（四个视图共用一份）。
+ * 为什么不共用一个全局计数：一格故障会把整墙的预算一起吃掉，
+ * 其它格子再出问题就不再重建了。
+ */
+const stall = useStreamPlayback({
+  stopSession: (tile) => streamApi.stop({ serial: tile.serial, code: tile.code }),
+  replay: (tile) => playTile(tile),
+  onRebuilding: (n, max, tile) => { tile.state = '重新拉流中…' }
+})
+
 async function playTile(tile) {
   if (!tile.channelKey) {
     ElMessage.warning('请先选择通道')
@@ -838,34 +852,15 @@ async function playTile(tile) {
     // 多格同播才静音。加 1 是因为此刻本格还没进 playing，audibleTiles 不含它
     keepMuted: audibleTiles.value.length + (tile.playing ? 0 : 1) > 1,
     // 通了但始终没视频轨 → 拆会话重推（ZLM 超时会把未就绪的视频轨永久丢弃）
-    onStall: () => rebuildStalled(tile),
+    onStall: () => stall.handleStall(tile),
+    // 稳定播放 10 秒后归还本格的预算，否则两次无关故障就把这一格永久锁死
+    onStable: () => stall.refund(tile.id),
     // 播放器自动改协议时同步顶部下拉（典型：FLV 解码失败重试耗尽 → 切 WebRTC）。
     // 各格协议独立，下拉只代表「下次点播用哪个」，取最后操作的格子合理
     onProtoChange: (p) => {
       if (p && p !== proto.value) proto.value = p
     }
   })
-}
-
-/** 单格「有数据但无画面」的重建上限 2 次：电视墙长期开着，设备坏了无限重建会把整墙刷成不停 INVITE。 */
-const stallRetryOf = {}
-
-/**
- * 有数据却无视频轨 → 停会话 + 重新点播。必须停会话：ZLM 等轨超时会把未就绪的视频轨
- * 永久丢弃（Track not ready for a long time, ignored: H264），重连播放器没用。
- */
-async function rebuildStalled(tile) {
-  const n = stallRetryOf[tile.id] || 0
-  if (n >= 2 || !tile.channelKey) return
-  stallRetryOf[tile.id] = n + 1
-  tile.state = '重新拉流中…'
-  try {
-    await streamApi.stop({ serial: tile.serial, code: tile.code })
-  } catch (e) {
-    // 会话可能已被空闲巡检关掉，继续重播即可
-  }
-  if (!tile.channelKey || !players[tile.id]) return
-  await playTile(tile)
 }
 
 function stopTile(tile) {
@@ -886,7 +881,7 @@ function stopTile(tile) {
 function clearTile(tile) {
   stopTile(tile)
   // 格子被腾空就是新的一轮，重置卡轨重建计数
-  delete stallRetryOf[tile.id]
+  stall.reset(tile.id)
   tile.channelKey = ''
   tile.serial = ''
   tile.code = ''

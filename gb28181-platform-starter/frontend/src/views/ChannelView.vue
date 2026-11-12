@@ -448,6 +448,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, streamApi, systemApi, visionApi } from '@/api'
 import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
+import { useStreamPlayback } from '@/composables/useStreamPlayback'
 import { usePlayerStateType } from '@/composables/usePlayerState'
 import { usePagination } from '@/composables/usePagination'
 import { useFillTableRows } from '@/composables/useFillTableRows'
@@ -644,7 +645,7 @@ watch(playing, () => syncVisionWatched())
  *
  * <p>早先这里传 {@code :disabled="!playing"}，导致「保存一次后所有按钮全禁用」：
  * 保存会重读设备 CGI（PtzTour 有 120KB+），把 WebRTC 协商挤超时 →
- * {@code onStall} 触发 {@code rebuildStalled()} 停会话重播 → 重建 2 次预算用完 →
+ * {@code onStall} 触发 {@code useStreamPlayback#handleStall} 停会话重播 → 重建 2 次预算用完 →
  * {@code playing} 永久 false → 整个面板永久禁用，只能关掉弹窗重开。
  *
  * <p>现在只在「弹窗没开 / 没有目标通道」时禁用。
@@ -796,7 +797,7 @@ async function preview(row) {
   previewTarget.value = row
   previewDialog.value = true
   // 用户主动点开一个通道才算新的一轮，重置卡轨重建计数
-  stallRetry = 0
+  stall.reset()
   await ensureMediaPort()
   /*
    * 先读一次检测总览：弹窗里的按钮要根据「后端这一路是不是本来就在检测」
@@ -834,30 +835,19 @@ function shareLive(row) {
 }
 
 /**
- * 画面未就绪的重建次数上限（每轮最多 2 次）。重建 = 停会话 + 重新 INVITE，
- * 设备要重新起推；设备自己坏了重试多少次都没用。
+ * 画面未就绪的自愈：停会话 + 重新点播，单轮最多 2 次。
+ *
+ * <p>逻辑已抽到 {@link useStreamPlayback}（四个视图共用一份），
+ * 差异点只有两个回调：怎么停会话、怎么重新点播。
  */
-let stallRetry = 0
-
-/**
- * 流是通的、却始终没有视频轨 → 重建整路流。必须停会话而不是重连播放器：
- * ZLM 等轨超时会把 H264 轨永久丢弃（Track not ready for a long time, ignored: H264），
- * 该决定绑定在媒体源上，重连 FLV 连的还是同一个源；只有 stream/stop 拆掉会话、
- * 重新 INVITE 才会生成新源。
- */
-async function rebuildStalled() {
-  const row = previewTarget.value
-  if (!row || stallRetry >= 2) return
-  stallRetry++
-  ElMessage.warning('画面未就绪，正在重新拉流…')
-  try {
-    await streamApi.stop({ serial: row.deviceId, code: row.id })
-  } catch (e) {
-    // 会话可能已被空闲巡检关掉，继续重播即可
-  }
-  if (!previewDialog.value) return
-  await startPlay()
-}
+const stall = useStreamPlayback({
+  stopSession: () => streamApi.stop({
+    serial: previewTarget.value?.deviceId,
+    code: previewTarget.value?.id
+  }),
+  replay: () => startPlay(),
+  onRebuilding: () => ElMessage.warning('画面未就绪，正在重新拉流…')
+})
 
 async function startPlay() {
   const row = previewTarget.value
@@ -913,8 +903,10 @@ async function startPlay() {
         ElMessage.warning(`当前浏览器不支持该协议，已自动切换到「${hit ? hit.label : used}」`)
       }
     },
-    // 通了但始终没视频轨时，重建整路流（见 rebuidStalled 的说明）
-    onStall: () => rebuildStalled()
+    // 通了但始终没视频轨时，重建整路流（见 useStreamPlayback 的说明）
+    onStall: () => stall.handleStall(),
+    // 稳定播放 10 秒后归还重建预算，否则两次无关故障就会把预算永久吃光
+    onStable: () => stall.refund()
   })
   syncProtoLabel()
   syncStreamLabel()

@@ -232,8 +232,9 @@ import { ElMessage } from 'element-plus'
 import { Download, Loading, VideoPlay } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 import { deviceApi, playbackApi, systemApi } from '@/api'
-import { resolvePlayUrls } from '@/player/resolvePlayUrls'
+import { resolvePlayUrls, hasPlayUrl } from '@/player/resolvePlayUrls'
 import { useLivePlayer } from '@/composables/useLivePlayer'
+import { useStreamPlayback } from '@/composables/useStreamPlayback'
 import { useDownloadStore } from '@/stores/download'
 import { useAuthStore } from '@/stores/auth'
 
@@ -654,12 +655,6 @@ async function search() {
 }
 
 
-/** 画面起不来时的重拉次数。只在用户主动点播时清零，自动重建沿用，否则会无限重试。 */
-let stallRetry = 0
-
-/** 最多重拉几次。超过就停下来告诉用户，而不是一直重试刷设备。 */
-const MAX_STALL_RETRY = 2
-
 /**
  * 发起回放并播放。
  * @param {object} row 录像段
@@ -667,7 +662,8 @@ const MAX_STALL_RETRY = 2
  * @param {number} [opts.startOffset] 从本段第几秒开始播（拖动定位用）
  */
 async function play(row, opts = {}) {
-  if (!opts.rebuild) stallRetry = 0
+  // 用户主动点播 / 换段才算新的一轮，重置泵障重建预算（内部重拉沿用）
+  if (!opts.rebuild) stall.reset()
   const offset = Math.max(0, Math.floor(Number(opts.startOffset) || 0))
   // 画面在页面顶部，列表里点「回放」时它可能已在屏幕外，滚进视野
   if (playStage.value) {
@@ -710,16 +706,21 @@ async function play(row, opts = {}) {
   await sleep(120)
 
   const urls = resolvePlayUrls(info, mediaHttpPort.value)
-  if (!urls.wsFlv && !urls.webrtc) {
-    ElMessage.error('未获取到回放地址')
-    return
-  }
   /*
    * 优先 WebRTC，退回 WS-FLV。不走纯 FLV：video.js 9 + videojs-flvjs 的 flv 源
    * 处理器注册不全，Html5.canPlayType() 会抛异常，被判成「不支持的类型」后
    * 起播看门狗反复重拉（表现为一直转圈）。
    */
   const playbackProto = urls.webrtc ? 'webrtc' : 'wsflv'
+  /*
+   * 地址校验与其他视图同口径（hasPlayUrl）。早先这里写成
+   * {@code !urls.wsFlv && !urls.webrtc}，把 HLS 漏在外 ——
+   * 只返回 HLS 地址的来源会被误判成「取不到回放地址」。
+   */
+  if (!hasPlayUrl(playbackProto, urls)) {
+    ElMessage.error('未获取到回放地址')
+    return
+  }
   await player.play(playbackKey.value, urls, {
     proto: playbackProto,
     // 不传 _vod：国标回放的媒体面就是设备主动推 RTP，与直播同形状。按点播传会让
@@ -729,9 +730,9 @@ async function play(row, opts = {}) {
     // 必须接 onStall，否则看门狗触发后什么也不发生。播放器自己重连没用 —— 连的是同一个媒体源；
     // 这里要停会话 + 重新 INVITE（换 SSRC、ZLM 重建媒体源）。
     // 典型成因：某下级平台应答后 11 秒才推视频，ZLM 等轨道超时会把 H264 轨永久丢弃。
-    onStall: rebuildStream,
-    // 稳定播放 10 秒后归还重拉预算，否则几次无关的起播故障会把 2 次预算永久耗光
-    onStable: () => { stallRetry = 0 },
+    onStall: () => stall.handleStall(),
+    // 稳定播放 10 秒后归还重拉预算，否则几次无关的起播故障会把预算永久耗光
+    onStable: () => stall.refund(),
     // 官方控件动作 → 国标 SIP 指令（定位 = 重新 INVITE；暂停/续播/倍速走 INFO）
     vod: {
       duration: segmentSeconds.value,
@@ -892,27 +893,25 @@ async function restartAt(offsetSeconds) {
   clearSeeking()
 }
 
-/** 重拉整条回放流。只在媒体源丢了视频轨、或连上却收不到字节时调用 —— 重连 WebSocket 没用。 */
-async function rebuildStream() {
-  const row = current.value
-  if (!row) return
-  if (stallRetry >= MAX_STALL_RETRY) {
-    ElMessage.error('画面无法就绪，已重试多次。请返回后重新点播，或检查设备推流')
-    return
-  }
-  stallRetry++
-  /*
-   * 重拉后从「当前看到的画面」接着看。
-   *
-   * <p><b>必须用 {@link #playPosition}（段内位置），不能用 {@code player.position}。</b>
-   * 后者是媒体时间轴的原始值：从段中间起播时它是 0，而段内位置 = positionOffset + 它。
-   * 早先这里直接传了 {@code player.position}，于是拖到 9:14 后只要起播看门狗
-   * 碰一次（重新 INVITE 本来就要 2~3 秒，很容易超时），就会
-   * {@code restartAt(0)} → 从段起点（8:00）重推 —— 用户看到的就是
-   * 「拖到 9:14，它自己给我回到 8 点」。
-   */
-  await restartAt(Math.floor(playPosition.value || 0))
-}
+/**
+ * 画面未就绪的自愈（停会话 + 按当前位置重新 INVITE），单轮最多 2 次。
+ *
+ * <p>预算逻辑已抽到 {@link useStreamPlayback}（四个视图共用一份）。
+ * 本页独有的只有 {@code replay} 的语义：
+ * <b>必须用 {@link #playPosition}（段内位置），不能用 {@code player.position}</b>。
+ * 后者是媒体时间轴的原始值，从段中间起播时它是 0；
+ * 早先这里传了它，于是拖到 9:14 后只要看门狗碰一次就会从段起点（8:00）重推。
+ */
+const stall = useStreamPlayback({
+  stopSession: () => playbackApi.stop({ serial: serial.value, code: code.value }),
+  replay: () => {
+    const row = current.value
+    if (!row) return
+    return restartAt(Math.floor(playPosition.value || 0))
+  },
+  onExhausted: () => ElMessage.error(
+    '画面无法就绪，已重试多次。请返回后重新点播，或检查设备推流')
+})
 
 /* ==================== 录像下载 ==================== */
 /*
@@ -1032,7 +1031,7 @@ async function control(command, extra = {}) {
 /**
  * 继续播放：优先发 SIP PLAY npt=now-（毫秒级），失败才重新协商 —— 停会话 + INVITE 要 2~3 秒黑屏。
  * 暂停期间设备停推 RTP，ZLM 对空 RTP 会话有硬超时（实测十几秒到 100 秒）会注销媒体源，
- * 那时 INFO 发成功但没画面，由看门狗（12 秒无关键帧 / 20 秒无字节）触发 rebuildStream。
+ * 那时 INFO 发成功但没画面，由看门狗（12 秒无关键帧 / 20 秒无字节）触发 stall.handleStall。
  */
 async function resumePlayback() {
   const row = current.value
