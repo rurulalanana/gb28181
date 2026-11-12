@@ -126,27 +126,6 @@ public class ZlmFrameSource implements FrameSource {
     private static final int FRAME_WIDTH = 416;
 
     /**
-     * 检测区域对应的 ffmpeg crop 片段；{@code null} 表示全画面。
-     *
-     * <p>在构造时就算好，避免每帧拼接字符串。
-     */
-    private final String cropFilter;
-
-    /**
-     * 组装 {@code -vf} 参数：{@code fps=N[,crop=...],scale=416:-2}。
-     *
-     * <p>裁剪必须在 scale 之前：先裁再缩，缩放的输入像素更少，开销更小；
-     * 反过来先缩会把要保留的细节先丢掉。
-     */
-    private String videoFilter() {
-        StringBuilder sb = new StringBuilder("fps=").append(fps);
-        if (cropFilter != null) {
-            sb.append(',').append(cropFilter);
-        }
-        return sb.append(",scale=").append(FRAME_WIDTH).append(":-2").toString();
-    }
-
-    /**
      * 解封装探针大小（字节）。
      *
      * <h3>为什么必须显式设置（这是「开启检测要等好几秒才出框」的根因）</h3>
@@ -214,60 +193,9 @@ public class ZlmFrameSource implements FrameSource {
      * @param fps       目标出帧频率（每路）
      */
     public ZlmFrameSource(String sourceId, String streamUrl, double fps) {
-        this(sourceId, streamUrl, fps, null);
-    }
-
-    /**
-     * @param cropRegion 检测区域（归一化 {@code x,y,w,h}，逗号分隔）；为空或非法时全画面
-     */
-    public ZlmFrameSource(String sourceId, String streamUrl, double fps, String cropRegion) {
         this.sourceId = sourceId;
         this.streamUrl = streamUrl;
         this.fps = fps <= 0 ? 1.0 : fps;
-        this.cropFilter = cropFilterOf(cropRegion);
-    }
-
-    /**
-     * 把归一化的 {@code x,y,w,h} 转成 ffmpeg 的 crop 滤镜片段（不含前导逗号）。
-     *
-     * <p>用 {@code iw*}/{@code ih*} 表达式而不是算好的像素值：换码流分辨率
-     * （主/次码流切换、设备改配置）时裁剪范围自动跟随，不需要重配。
-     *
-     * <p>非法输入一律返回 {@code null}（= 全画面）：裁剪配错了会让画面只剩一角，
-     * 比不裁更糟 —— 宁可退化成「全画面但检不出远景小目标」。
-     *
-     * @return 如 {@code crop=iw*0.29:ih*0.28:iw*0.29:ih*0.61}；全画面时 null
-     */
-    static String cropFilterOf(String cropRegion) {
-        if (cropRegion == null || cropRegion.isBlank()) {
-            return null;
-        }
-        String[] parts = cropRegion.trim().split("[,;\\s]+");
-        if (parts.length != 4) {
-            return null;
-        }
-        double[] v = new double[4];
-        for (int i = 0; i < 4; i++) {
-            try {
-                v[i] = Double.parseDouble(parts[i]);
-            } catch (NumberFormatException e) {
-                return null;
-            }
-            if (v[i] < 0 || v[i] > 1) {
-                return null;
-            }
-        }
-        double x = v[0], y = v[1], w = v[2], h = v[3];
-        // 宽高为 0 或越界（x+w>1 / y+h>1）都当非法：ffmpeg 会直接报错退出
-        if (w <= 0 || h <= 0 || x + w > 1.0001 || y + h > 1.0001) {
-            return null;
-        }
-        // 全画面不必加滤镜
-        if (x < 1e-6 && y < 1e-6 && w > 0.9999 && h > 0.9999) {
-            return null;
-        }
-        return String.format(java.util.Locale.ROOT,
-                "crop=iw*%.5f:ih*%.5f:iw*%.5f:ih*%.5f", w, h, x, y);
     }
 
     /**
@@ -336,16 +264,13 @@ public class ZlmFrameSource implements FrameSource {
                 // 从管道读 MPEG-TS，用 fps 滤镜按目标频率出图（这是「常驻」的关键）
                 "-i", "pipe:0",
                 /*
-                 * 先按目标帧率抽帧，再裁剪，最后缩到模型输入尺寸。
+                 * 先按目标帧率抽帧，再缩到模型输入尺寸。
                  *
                  * 顺序不能反：先 scale 后 fps 会让 ffmpeg 把每一帧都缩一遍
                  * （上游 25fps → 每秒缩 25 次），而先 fps 后 scale 只缩 4 次。
                  * 画质上两者等价（fps 滤镜只丢帧不混合），CPU 差好几倍。
-                 *
-                 * crop 放在 scale 之前：裁剪后像素更少，scale 的开销反而更小。
-                 * 它同时是「远景小目标能不能检出」的关键 —— 见 cropFilterOf。
                  */
-                "-vf", videoFilter(),
+                "-vf", "fps=" + fps + ",scale=" + FRAME_WIDTH + ":-2",
                 "-f", "image2pipe",
                 "-vcodec", "mjpeg",
                 "-q:v", JPEG_QUALITY,

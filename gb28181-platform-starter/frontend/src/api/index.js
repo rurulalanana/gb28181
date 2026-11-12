@@ -161,24 +161,16 @@ export const visionApi = {
    * @param {string} scenarioId 检测能力（场景 id）；空则用默认场景
    * @param {string} remark 备注
    */
-  addChannel: (deviceId, channelId, scenarioId, remark, cropRegion) =>
+  addChannel: (deviceId, channelId, scenarioId, remark) =>
     post('/vision/channels/add', {
       device_id: deviceId,
       channel_id: channelId,
       scenario_id: scenarioId,
-      crop_region: cropRegion || null,
       remark
     }),
   /** 修改某通道的检测能力（场景）。后端会重启这一路。 */
   updateScenario: (channelId, scenarioId) =>
     post('/vision/channels/scenario', { channel_id: channelId, scenario_id: scenarioId }),
-  /**
-   * 修改某通道的检测区域（归一化 `x,y,w,h`，如 `0.29,0.61,0.29,0.28`）。
-   *
-   * 传 null / 空串 = 全画面。后端会重启这一路（裁剪是 ffmpeg 启动参数）。
-   */
-  updateCrop: (channelId, cropRegion) =>
-    post('/vision/channels/crop', { channel_id: channelId, crop_region: cropRegion || null }),
   /** 移除一路检测通道（按通道编码）。 */
   removeChannel: (channelId) => post('/vision/channels/remove', { channel_id: channelId })
 }

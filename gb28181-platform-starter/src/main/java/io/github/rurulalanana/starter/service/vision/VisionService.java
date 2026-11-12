@@ -332,43 +332,17 @@ public class VisionService {
                 ? List.of() : registry.scenarioLabels(scenario.id());
         VisionPipeline pipeline = new VisionPipeline(detector,
                 pipelineConfig(scenarioLabels), sink, new Roi(List.of()));
-        // 检测区域：远景小目标必须靠裁剪放大才能检出，见 cropRegionOf
-        String cropRegion = cropRegionOf(channelKey);
-        ZlmFrameSource source = new ZlmFrameSource(channelKey, tsUrl, props.getFps(), cropRegion);
+        ZlmFrameSource source = new ZlmFrameSource(channelKey, tsUrl, props.getFps());
         AutoCloseable detach = pipeline.attach(source);
         running.put(channelKey, new Running(pipeline, detach, modelId, source));
         startedAt.put(channelKey, System.currentTimeMillis());
         stallWarned.remove(channelKey);
-        log.info("视觉检测已开启: channel={} model={} scenario={} labels={} 检测区域={} url={}",
+        log.info("视觉检测已开启: channel={} model={} scenario={} labels={} url={}",
                 channelKey, modelId,
                 scenario == null ? "-" : scenario.id(),
                 scenarioLabels.isEmpty() ? "全部" : scenarioLabels,
-                cropRegion == null || cropRegion.isBlank() ? "全画面" : cropRegion,
                 tsUrl);
         return true;
-    }
-
-    /**
-     * 某通道配置的检测区域（归一化 {@code x,y,w,h}）；未配置时返回 {@code null}。
-     *
-     * <p>每次都读库不缓存：缓存会引出「界面上改了检测区域但运行的还是旧的」，
-     * 运维很难意识到需要重启检测。这条查询按 channel_id 走唯一索引，代价可忽略。
-     */
-    private String cropRegionOf(String channelKey) {
-        try {
-            com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
-                    new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
-            String[] ids = splitKey(channelKey);
-            q.eq("channel_id", ids[1]);
-            List<GbVisionChannel> rows = visionChannelMapper.selectList(q);
-            if (rows == null || rows.isEmpty()) {
-                return null;
-            }
-            return rows.get(0).getCropRegion();
-        } catch (RuntimeException e) {
-            log.debug("读取通道检测区域失败，按全画面: {} {}", channelKey, e.getMessage());
-            return null;
-        }
     }
 
     /**
@@ -518,8 +492,6 @@ public class VisionService {
             VisionProperties.Scenario sc = registry.scenario(row.getScenarioId());
             item.put("scenarioName", sc == null ? null : sc.name());
             item.put("scenarioCategory", sc == null ? null : sc.category());
-            // 检测区域：界面要能看出这一路配没配裁剪
-            item.put("cropRegion", row.getCropRegion());
             item.put("remark", row.getRemark());
             item.put("createTime", row.getCreateTime() == null ? null
                     : TimeFormats.toDisplay(row.getCreateTime()));
@@ -565,11 +537,9 @@ public class VisionService {
      * 如果这里因为「设备不在线」拒绝保存，运维就得等设备上线再来配一次。
      *
      * @param scenarioId 这一路跑哪个场景；为空时用默认场景
-     * @param cropRegion 检测区域（归一化 {@code x,y,w,h}）；为空 = 全画面
      * @return 是否为新插入（{@code false} 表示已存在）
      */
-    public boolean addChannel(String deviceId, String channelId, String scenarioId,
-                              String cropRegion, String remark) {
+    public boolean addChannel(String deviceId, String channelId, String scenarioId, String remark) {
         if (channelId == null || channelId.isBlank()) {
             throw new IllegalArgumentException("通道编码不能为空");
         }
@@ -577,7 +547,6 @@ public class VisionService {
         String did = deviceId == null || deviceId.isBlank() ? null : deviceId.trim();
         String sid = scenarioId == null || scenarioId.isBlank()
                 ? registry.defaultScenarioId() : scenarioId.trim();
-        String crop = normalizeCrop(cropRegion);
 
         com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
                 new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
@@ -589,19 +558,8 @@ public class VisionService {
             row.setDeviceId(did);
             row.setChannelId(cid);
             row.setScenarioId(sid);
-            row.setCropRegion(crop);
             row.setRemark(remark);
             visionChannelMapper.insert(row);
-        } else {
-            // 已存在时只补检测区域（其它字段可能是运维特意配的，不覆盖）
-            List<GbVisionChannel> old = visionChannelMapper.selectList(q);
-            if (crop != null && old != null && !old.isEmpty()
-                    && !crop.equals(old.get(0).getCropRegion())) {
-                GbVisionChannel row = old.get(0);
-                row.setCropRegion(crop);
-                visionChannelMapper.updateById(row);
-                restartChannel(row.getDeviceId(), cid);
-            }
         }
         // 立即试一次；失败也无所谓，定时任务会补
         String key = did == null ? cid : did + "/" + cid;
@@ -609,97 +567,6 @@ public class VisionService {
             start(key);
         }
         return inserted;
-    }
-
-    /** 兼容旧调用方（不带检测区域）。 */
-    public boolean addChannel(String deviceId, String channelId, String scenarioId, String remark) {
-        return addChannel(deviceId, channelId, scenarioId, null, remark);
-    }
-
-    /**
-     * 校验并规范化检测区域字符串；非法输入返回 {@code null}（= 全画面）。
-     *
-     * <p>非法值一律退回全画面而不是报错：调用方可能是批量导入或旧版前端，
-     * 因为一个可选的辅助参数失败而拒绝整个请求会让主流程也挂掉。
-     */
-    static String normalizeCrop(String cropRegion) {
-        if (cropRegion == null || cropRegion.isBlank()) {
-            return null;
-        }
-        String s = cropRegion.trim().replaceAll("\\s+", "");
-        String[] parts = s.split("[,;]", -1);
-        if (parts.length != 4) {
-            return null;
-        }
-        double[] v = new double[4];
-        for (int i = 0; i < 4; i++) {
-            try {
-                v[i] = Double.parseDouble(parts[i]);
-            } catch (NumberFormatException e) {
-                return null;
-            }
-            if (v[i] < 0 || v[i] > 1) {
-                return null;
-            }
-        }
-        if (v[2] <= 0 || v[3] <= 0 || v[0] + v[2] > 1.0001 || v[1] + v[3] > 1.0001) {
-            return null;
-        }
-        // 归一化后保留 4 位小数，避免存储里出现 0.29000000000000004 这类尾巴
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < 4; i++) {
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append(String.format(java.util.Locale.ROOT, "%.4f", v[i]));
-        }
-        return sb.toString();
-    }
-
-    /**
-     * 修改某通道的检测区域（{@code null}/空 = 全画面）。
-     *
-     * <p>改完必须重启这一路：裁剪是在 {@code start()} 时作为 ffmpeg 滤镜参数
-     * 固定下来的，运行中的进程不会自己改。-1 这种不可见的变化不重启最难排查。
-     *
-     * @return 是否确实改了（通道不存在返回 false）
-     */
-    public boolean updateChannelCrop(String channelId, String cropRegion) {
-        if (channelId == null || channelId.isBlank()) {
-            return false;
-        }
-        String cid = channelId.trim();
-        String crop = normalizeCrop(cropRegion);
-        com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<GbVisionChannel> q =
-                new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<>();
-        q.eq("channel_id", cid);
-        List<GbVisionChannel> rows = visionChannelMapper.selectList(q);
-        if (rows == null || rows.isEmpty()) {
-            return false;
-        }
-        GbVisionChannel row = rows.get(0);
-        row.setCropRegion(crop);
-        visionChannelMapper.updateById(row);
-        restartChannel(row.getDeviceId(), cid);
-        log.info("检测区域已更新: channel={} 区域={}", cid, crop == null ? "全画面" : crop);
-        return true;
-    }
-
-    /** 停掉再起某通道的检测（配置变更后让新参数生效）。 */
-    private void restartChannel(String deviceId, String channelId) {
-        for (String key : new ArrayList<>(running.keySet())) {
-            if (key.endsWith("/" + channelId) || (!key.contains("/") && key.equals(channelId))) {
-                stop(key);
-                start(key);
-                return;
-            }
-        }
-        // 没在运行就补一次启动
-        String key = deviceId == null || deviceId.isBlank()
-                ? channelId : deviceId + "/" + channelId;
-        if (!running.containsKey(key)) {
-            start(key);
-        }
     }
 
     /**

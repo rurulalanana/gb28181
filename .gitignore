@@ -55,15 +55,6 @@ replay_pid*.log
 /*/*.py
 /*/*.ps1
 
-# 排查用的临时 shell 脚本与截图（_diag_*.sh / _verify_*.sh / _full.png …）。
-# 历史上这些被 `git add -A` 误提交过一次 —— 只护住了 *.py/*.ps1，
-# 漏了 *.sh 和图片。约定同上：要长期保留的放 <模块>/scripts/ 下。
-/*.sh
-/*/*.sh
-/*.png
-/*.jpg
-/*.jpeg
-
 # ⚠️ 只忽略根目录的 *.sha1（当初遗留的 netsdk 校验文件）。
 # 不能写成全局 *.sha1 —— sdk-dahua/lib/netsdk-repo 是 Maven 本地仓库镜像，
 # 里边的 .sha1 是它的校验文件，漏了会让离线构建报校验失败。

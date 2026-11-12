@@ -211,7 +211,6 @@ public class VisionController {
             @RequestParam(required = false) String device_id,
             @RequestParam String channel_id,
             @RequestParam(required = false) String scenario_id,
-            @RequestParam(required = false) String crop_region,
             @RequestParam(required = false) String remark) {
         StpUtil.checkLogin();
         if (!props.isEnabled()) {
@@ -227,38 +226,11 @@ public class VisionController {
                 && registry.scenario(scenario_id) == null) {
             throw BizException.badRequest("场景不存在: " + scenario_id);
         }
-        boolean inserted = visionService.addChannel(
-                device_id, channel_id, scenario_id, crop_region, remark);
+        boolean inserted = visionService.addChannel(device_id, channel_id, scenario_id, remark);
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("channel_id", channel_id);
         data.put("inserted", inserted);
         data.put("msg", inserted ? "已添加" : "该通道已在列表中");
-        return ApiResponse.ok(data);
-    }
-
-    /**
-     * 修改某通道的检测区域。
-     *
-     * <p>参数 {@code crop_region} 为归一化 {@code x,y,w,h}（如 {@code 0.29,0.61,0.29,0.28}），
-     * 传空表示全画面。会重启这一路（裁剪是 ffmpeg 启动参数，不重启不生效）。
-     *
-     * <p><b>为什么需要它</b>：模型输入固定 416，1920×1080 画面缩下去是 0.217 倍，
-     * 远景里 33px 的人只剩 7px，实测检出 0 个；而裁到 480×270 后人为 28px，
-     * 同一帧能检出 10 个。所以「裁哪里」是能不能检出的决定性因素。
-     */
-    @Operation(summary = "修改检测通道的检测区域")
-    @PostMapping("/channels/crop")
-    public ApiResponse<Map<String, Object>> updateCrop(
-            @RequestParam String channel_id,
-            @RequestParam(required = false) String crop_region) {
-        StpUtil.checkLogin();
-        boolean ok = visionService.updateChannelCrop(channel_id, crop_region);
-        if (!ok) {
-            throw BizException.notFound("检测通道不存在: " + channel_id);
-        }
-        Map<String, Object> data = new LinkedHashMap<>();
-        data.put("channel_id", channel_id);
-        data.put("crop_region", crop_region == null || crop_region.isBlank() ? null : crop_region);
         return ApiResponse.ok(data);
     }
 

@@ -265,14 +265,6 @@ CREATE INDEX IF NOT EXISTS idx_gb_vision_channel_device
 -- "column scenario_id does not exist"，整个 AI 检测页都打不开。
 ALTER TABLE gb_vision_channel ADD COLUMN IF NOT EXISTS scenario_id VARCHAR(64);
 
--- 老库升级：补充「检测区域」列（归一化 x,y,w,h，逗号分隔，如 0.29,0.61,0.29,0.28）。
--- 为空 = 全画面。
---
--- 为什么必须有这一列：模型输入固定 416，1920x1080 的画面缩下去是 0.217 倍，
--- 远景里 33px 高的人只剩 7px —— 实测检出 0 个。而裁到 480x270 后人为 28px，
--- 同一帧能检出 10 个。所以「裁哪里」直接决定能不能检出，必须按通道可配。
-ALTER TABLE gb_vision_channel ADD COLUMN IF NOT EXISTS crop_region VARCHAR(64);
-
 -- -------------------- 设备录像目录（RecordInfo） --------------------
 
 CREATE TABLE IF NOT EXISTS gb_device_record (
