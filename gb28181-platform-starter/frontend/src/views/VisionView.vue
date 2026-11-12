@@ -144,6 +144,25 @@
           </template>
         </el-table-column>
 
+        <!--
+          检测区域：远景通道必须靠裁剪放大才能检出。
+          模型输入固定 416，1920×1080 缩下去是 0.217 倍，33px 的人只剩 7px（实测检出 0 个）；
+          裁到 480×270 后人为 28px，同一帧能检出 10 个。所以这是一项必配项。
+        -->
+        <el-table-column label="检测区域" width="150" align="center">
+          <template #default="{ row }">
+            <el-button
+              link
+              type="primary"
+              :disabled="!canWrite"
+              :title="row.cropRegion ? '点击修改检测区域' : '当前检测全画面，点此框选区域以检出远景小目标'"
+              @click="openCrop(row)"
+            >
+              <span :class="{ 'text-muted': !row.cropRegion }">{{ cropText(row.cropRegion) }}</span>
+            </el-button>
+          </template>
+        </el-table-column>
+
         <el-table-column prop="remark" label="备注" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <span :class="{ 'text-muted': !row.remark }">{{ row.remark || '—' }}</span>
@@ -279,6 +298,37 @@
         >
           添加所选（{{ picked.length }}）
         </el-button>
+      </template>
+    </el-dialog>
+
+    <!--
+      检测区域编辑。用百分比而不是 0~1 归一化值：用户是照着画面量位置，
+      「从左边第 29%、宽 29%」比「0.29」直观，也不容易填错量级。
+    -->
+    <el-dialog v-model="cropDialog" title="检测区域" width="520px" append-to-body>
+      <div class="crop-tip">
+        只对框内区域做检测。模型输入固定 416×416，<b>远景里很小的人检出不了</b>，
+        把范围缩小到人常出现的区域（如路面）就能放大后检出。留空或全 0~100 表示全画面。
+      </div>
+      <el-form :model="cropForm" label-width="86px" style="margin-top: 14px">
+        <el-form-item label="左边距 %">
+          <el-input-number v-model="cropForm.x" :min="0" :max="100" :step="1" controls-position="right" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="上边距 %">
+          <el-input-number v-model="cropForm.y" :min="0" :max="100" :step="1" controls-position="right" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="宽度 %">
+          <el-input-number v-model="cropForm.w" :min="1" :max="100" :step="1" controls-position="right" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="高度 %">
+          <el-input-number v-model="cropForm.h" :min="1" :max="100" :step="1" controls-position="right" style="width: 100%" />
+        </el-form-item>
+      </el-form>
+      <div v-if="cropError" class="crop-error">{{ cropError }}</div>
+      <template #footer>
+        <el-button :disabled="cropSaving" @click="clearCrop">恢复全画面</el-button>
+        <el-button @click="cropDialog = false">取消</el-button>
+        <el-button type="primary" :loading="cropSaving" @click="saveCrop">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -430,6 +480,88 @@ async function changeScenario(row, scenarioId) {
     ElMessage.error(e.message || '切换失败')
     // 失败要把下拉恢复到实际值，否则界面显示的和后端不一致
     await load()
+  }
+}
+
+// ==================== 检测区域 ====================
+
+/** 检测区域编辑弹窗。 */
+const cropDialog = ref(false)
+const cropSaving = ref(false)
+const cropError = ref('')
+const cropTarget = ref(null)
+const cropForm = reactive({ x: 0, y: 0, w: 100, h: 100 })
+
+/**
+ * 把 `x,y,w,h`（归一化 0~1）显示成百分比文案。
+ *
+ * @param {string} cropRegion 后端存的值；空表示全画面
+ */
+function cropText(cropRegion) {
+  const p = parseCrop(cropRegion)
+  if (!p) return '全画面'
+  const pct = (v) => Math.round(v * 100)
+  return `${pct(p.w)}%×${pct(p.h)} @${pct(p.x)},${pct(p.y)}`
+}
+
+/** 解析归一化区域；非法或为空时返回 null。 */
+function parseCrop(cropRegion) {
+  if (!cropRegion) return null
+  const parts = String(cropRegion).split(',').map((v) => Number(v.trim()))
+  if (parts.length !== 4 || parts.some((v) => !Number.isFinite(v))) return null
+  return { x: parts[0], y: parts[1], w: parts[2], h: parts[3] }
+}
+
+function openCrop(row) {
+  cropTarget.value = row
+  cropError.value = ''
+  const p = parseCrop(row.cropRegion)
+  const pct = (v) => Math.round(v * 100)
+  cropForm.x = p ? pct(p.x) : 0
+  cropForm.y = p ? pct(p.y) : 0
+  cropForm.w = p ? pct(p.w) : 100
+  cropForm.h = p ? pct(p.h) : 100
+  cropDialog.value = true
+}
+
+/** 校验并把百分比转回归一化字符串；全画面返回 null。 */
+function toCropRegion() {
+  const { x, y, w, h } = cropForm
+  if (x + w > 100) return { error: `左边距 + 宽度不能超过 100（当前 ${x + w}）` }
+  if (y + h > 100) return { error: `上边距 + 高度不能超过 100（当前 ${y + h}）` }
+  if (w <= 0 || h <= 0) return { error: '宽度和高度必须大于 0' }
+  if (x === 0 && y === 0 && w === 100 && h === 100) return { value: null }
+  const n = (v) => (v / 100).toFixed(4)
+  return { value: `${n(x)},${n(y)},${n(w)},${n(h)}` }
+}
+
+async function saveCrop() {
+  const { error, value } = toCropRegion()
+  if (error) {
+    cropError.value = error
+    return
+  }
+  await applyCrop(value)
+}
+
+async function clearCrop() {
+  await applyCrop(null)
+}
+
+async function applyCrop(value) {
+  const row = cropTarget.value
+  if (!row) return
+  cropSaving.value = true
+  cropError.value = ''
+  try {
+    await visionApi.updateCrop(row.channelId, value)
+    ElMessage.success(value ? '检测区域已更新，正在重启这一路' : '已恢复全画面，正在重启这一路')
+    cropDialog.value = false
+    await load()
+  } catch (e) {
+    cropError.value = e.message || '保存失败'
+  } finally {
+    cropSaving.value = false
   }
 }
 
@@ -780,6 +912,21 @@ onMounted(async () => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.7;
+}
+
+/* 检测区域弹窗的说明与校验错误 */
+.crop-tip {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.crop-error {
+  font-size: 12px;
+  color: var(--el-color-danger);
+  padding-left: 86px;
 }
 </style>
 
