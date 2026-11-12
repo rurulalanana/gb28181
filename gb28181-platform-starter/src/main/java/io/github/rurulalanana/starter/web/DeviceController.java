@@ -29,6 +29,7 @@ import io.github.rurulalanana.starter.service.StreamService;
 import io.github.rurulalanana.starter.vo.ChannelListVo;
 import io.github.rurulalanana.starter.vo.ChannelNavigateVo;
 import io.github.rurulalanana.starter.vo.ChannelVo;
+import io.github.rurulalanana.starter.vo.DeviceCapabilitiesVo;
 import io.github.rurulalanana.starter.vo.DeviceListVo;
 import io.github.rurulalanana.starter.vo.DeviceVo;
 import io.github.rurulalanana.starter.vo.DiscoveredDeviceVo;
@@ -210,6 +211,27 @@ public class DeviceController {
         vo.setChannelTotal(channelStats[0]);
         vo.setChannelOnline(channelStats[1]);
         return ApiResponse.ok(vo);
+    }
+
+    /**
+     * 该设备支持哪些控制能力（前端据此把按钮置灰并显示原因）。
+     *
+     * <p><b>这个端点曾经漏了</b>：{@code ControlService#capabilities} 与
+     * {@code DeviceCapabilitiesVo} 都写好了，前端 {@code useDeviceCapabilities}
+     * 也在调 {@code GET /device/capabilities}，但没有任何 Controller 映射它 ——
+     * 请求落到静态资源处理器，日志里每打开一次云台面板就多一条
+     * 「静态资源不存在：api/v1/device/capabilities」，
+     * 前端 catch 后按「全部支持」降级。
+     *
+     * <p>结果是这个功能<b>静默失效</b>：大华设备上「强制关键帧 / 格式化 SD 卡 /
+     * 目标跟踪 / 看守位」等 11 个按钮全部可点，点了才收到「该设备不支持」。
+     * 补上之后 {@code supported} / {@code unsupported} 才真正下发。
+     */
+    @Operation(summary = "设备控制能力表")
+    @GetMapping("/capabilities")
+    public ApiResponse<DeviceCapabilitiesVo> capabilities(@RequestParam String serial) {
+        StpUtil.checkLogin();
+        return ApiResponse.ok(controlService.capabilities(serial));
     }
 
     // ==================== 通道 ====================
@@ -1108,8 +1130,10 @@ public class DeviceController {
      *
      * <h3>两条判据</h3>
      * <ul>
-     *   <li><b>SDK 直连设备</b>（大华等）：走 RTSP 地址的 {@code subtype} 参数，
-     *       恒支持主/子码流，与国标无关</li>
+     *   <li><b>SDK 直连设备</b>（大华等）：恒支持主/子码流。大华 SDK 用
+     *       {@code NET_IN_REALPLAY_BY_DATA_TYPE.rType} 选码流
+     *       （{@code NET_RType_Realplay_0}=主、{@code _1}=子）；
+     *       SDK 不可用退化成 RTSP 代理时，改用地址里的 {@code subtype}。</li>
      *   <li><b>国标设备</b>：看目录里上报的 {@code StreamNumberList}（GB/T 28181—2022 A.2.4.3）。
      *       判据实现在 {@link io.github.rurulalanana.starter.common.StreamIndex#supportsMultiStream}，
      *       那里说明了为什么不能只看「设备能推流」。</li>
@@ -1119,7 +1143,7 @@ public class DeviceController {
      * @param streamNumberList 设备上报的码流编号列表，如 {@code "0,1"}
      */
     private static boolean streamSwitchable(GbDevice device, String streamNumberList) {
-        // SDK 直连设备：RTSP subtype 是拉流地址的一部分，主/子码流一定可选
+        // SDK 直连设备：主/子码流是 SDK 取流参数，与国标 StreamNumberList 无关
         if (device != null
                 && io.github.rurulalanana.deviceaccess.DeviceKind.of(device.getSource())
                 != io.github.rurulalanana.deviceaccess.DeviceKind.GB28181) {

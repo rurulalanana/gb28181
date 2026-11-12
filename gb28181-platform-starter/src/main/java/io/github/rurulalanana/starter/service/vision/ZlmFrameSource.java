@@ -68,6 +68,18 @@ public class ZlmFrameSource implements FrameSource {
     /** 拉流读超时：活流一直有数据，超时说明流断了。 */
     private static final int READ_TIMEOUT_MS = 15_000;
 
+    /**
+     * 上游断流后的重连间隔（毫秒）。
+     *
+     * <p>取 1 秒：切码流时 ZLM 关闭旧媒体源与打开新的之间只隔几十毫秒，
+     * 但连太密没意义（新源可能还没注册好），1 秒既不会拖慢恢复，
+     * 也不会在设备长时间离线时空转太凶 —— 每个周期只是一次 TCP 连接尝试。
+     *
+     * <p>不设「最大重试次数」：设备断电几小时也很正常，
+     * 该由上层按「静默时长」判定并整路重启，而不是在这里数次数。
+     */
+    private static final long RECONNECT_DELAY_MS = 1_000;
+
     /** 单帧 JPEG 上限（4K 也够）：超过说明标记解析跑飞了，丢弃重来。 */
     private static final int MAX_JPEG_BYTES = 8 * 1024 * 1024;
 
@@ -352,36 +364,103 @@ public class ZlmFrameSource implements FrameSource {
 
     // ==================== 内部线程 ====================
 
-    /** 拉 MPEG-TS 写进 ffmpeg 的 stdin。 */
+    /**
+     * 拉 MPEG-TS 写进 ffmpeg 的 stdin。
+     *
+     * <h3>断流必须自己重连（真实故障：「切码流后 AI 识别卡死」）</h3>
+     * 早先这里是单次连接：{@code in.read()} 返回 -1 就 {@code break}，然后关掉
+     * ffmpeg 的 stdin 让它收尾退出。<b>但 {@code running} 标志仍是 true</b>，
+     * 于是整条管道已经死了，上层却完全不知道 —— 只能等
+     * {@code VisionService.warnIfStalled()} 在 45 秒静默后整路重启，
+     * 再叠加 30 秒的调度周期，用户最长要等 <b>75 秒</b>。
+     *
+     * <p>而「上游断流」在正常业务里<b>必然发生</b>：用户切主/子码流时，
+     * {@code DahuaSdkStreamService} 会释放旧取流再启新的，ZLM 的媒体源随之
+     * 关闭重开，HTTP-TS 连接立刻 EOF。实测日志（2026-11-12 09:25）：
+     * <pre>
+     *   09:25:16.656  大华 SDK 取流已释放: 10001/10001-1     ← 切子码流
+     *   09:25:17.300  大华 SDK 取流已启动: ... 码流=1
+     *   09:26:17.016  视觉检测已 60 秒没有新帧，判定为卡住      ← 白等 60 秒
+     * </pre>
+     *
+     * <p>所以这里改成<b>在循环内重连</b>，并且<b>不关 stdin</b>：
+     * ffmpeg 只是「暂时没有输入」，让它继续等，我们重新连上后接着写。
+     * 只有真正 {@link #stop()}（{@code running=false}）时才关 stdin 让它退出。
+     *
+     * <p>为什么不选择「整条管道重启」：那要重新起 ffmpeg 进程，
+     * 首帧又要等一次探针 + 关键帧（实测 1~4 秒），而且和上层的自愈逻辑重复。
+     * 保持进程存活、只换上游连接，恢复是亚秒级的。
+     *
+     * <p>{@code p.isAlive()} 的判断不能省：若 ffmpeg 自己已经死了
+     * （OOM、被系统杀、编解码崩溃），重连只会得到一个永远写不进去的
+     * 死管道，于是每 {@value #RECONNECT_DELAY_MS} 毫秒空转一次。
+     * 这种情况直接退出，交给上层 45 秒自愈重启。
+     */
     private Thread startPuller(Process p) {
         Thread t = new Thread(() -> {
-            try (InputStream in = openStream(streamUrl);
-                 OutputStream stdin = p.getOutputStream()) {
+            OutputStream stdin = null;
+            try {
+                stdin = p.getOutputStream();
                 byte[] buf = new byte[32 * 1024];
                 while (running.get()) {
-                    int n = in.read(buf);
-                    if (n < 0) {
+                    InputStream in = null;
+                    boolean eofByStop = false;
+                    try {
+                        in = openStream(streamUrl);
+                        int n;
+                        while (running.get() && (n = in.read(buf)) >= 0) {
+                            stdin.write(buf, 0, n);
+                            stdin.flush();
+                        }
+                        // 正常退出内层循环只有两种：running 变 false，或上游 EOF
+                        eofByStop = !running.get();
+                    } catch (IOException e) {
+                        if (running.get()) {
+                            log.debug("视觉取帧拉流中断: source={} {}", sourceId, e.getMessage());
+                        }
+                    } finally {
+                        closeQuietly(in);
+                    }
+                    if (eofByStop || !running.get()) {
                         break;
                     }
-                    stdin.write(buf, 0, n);
-                    stdin.flush();
-                }
-            } catch (IOException e) {
-                if (running.get()) {
-                    log.debug("视觉取帧拉流中断: source={} {}", sourceId, e.getMessage());
+                    if (!p.isAlive()) {
+                        // ffmpeg 已退出：重连没有意义，交给上层自愈重启
+                        log.warn("视觉取帧：ffmpeg 已退出，放弃重连: source={}", sourceId);
+                        break;
+                    }
+                    log.info("视觉取帧上游断流，{} ms 后重连: source={}（切码流/设备重推流会触发）",
+                            RECONNECT_DELAY_MS, sourceId);
+                    try {
+                        Thread.sleep(RECONNECT_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             } finally {
-                // 断流让 ffmpeg 知道没有更多输入
-                try {
-                    p.getOutputStream().close();
-                } catch (IOException ignored) {
-                    // 已关闭
-                }
+                /*
+                 * 只有线程真的要退出时才关 stdin（让 ffmpeg 收尾）。
+                 * 断流重连的路径不会走到这里 —— 那正是上个版本「卡死」的原因。
+                 */
+                closeQuietly(stdin);
             }
         }, "vision-pull-" + sourceId);
         t.setDaemon(true);
         t.start();
         return t;
+    }
+
+    /** 关流工具：{@code null} 与异常都吞掉（调用方只关心「不再用了」）。 */
+    private static void closeQuietly(java.io.Closeable c) {
+        if (c == null) {
+            return;
+        }
+        try {
+            c.close();
+        } catch (IOException ignored) {
+            // 已关闭 / 连接已断
+        }
     }
 
     /**

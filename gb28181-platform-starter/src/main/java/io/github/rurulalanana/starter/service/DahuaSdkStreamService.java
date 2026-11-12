@@ -47,7 +47,9 @@ public class DahuaSdkStreamService {
 
     /** 一路 SDK 取流：SDK 句柄 + ZLM 发布器。 */
     public record LiveStream(String key, String app, String stream,
-                             DahuaExtAccess.RealPlay realPlay, EsMediaPublisher publisher) {
+                             DahuaExtAccess.RealPlay realPlay, EsMediaPublisher publisher,
+                             /** 本次取的是哪一路码流（0 主码流 / 1 子码流），用于复用判断。 */
+                             int streamNumber) {
     }
 
     /** 正在取的流：{@code deviceId/channel} → 句柄。 */
@@ -73,11 +75,12 @@ public class DahuaSdkStreamService {
     /**
      * 启动一路 SDK 取流。
      *
-     * @param deviceId 设备编号（大华即序列号）
-     * @param channel  通道编码（{@code <deviceId>-<n>}）
+     * @param deviceId     设备编号（大华即序列号）
+     * @param channel      通道编码（{@code <deviceId>-<n>}）
+     * @param streamNumber 码流编号：0 主码流 / 1 子码流；{@code null} 或负数按主码流处理
      * @return 取流句柄；失败抛异常
      */
-    public LiveStream start(String deviceId, String channel) {
+    public LiveStream start(String deviceId, String channel, Integer streamNumber) {
         GbDevice device = deviceService.findDevice(deviceId);
         if (device == null) {
             throw BizException.notFound("设备不存在：" + deviceId);
@@ -92,6 +95,7 @@ public class DahuaSdkStreamService {
         }
 
         String key = deviceId + "/" + channel;
+        int wantStream = resolveStreamNumber(device, streamNumber);
         /*
          * 已在取流就直接复用，不要「先 stop 再 start」。
          *
@@ -99,19 +103,34 @@ public class DahuaSdkStreamService {
          * 后到的请求会把先建好的流拆掉重建，而设备侧还没释放上一路，
          * CLIENT_RealPlayByDataType 就会报 0x8000040A「创建套接字失败」——
          * 表现为「点播成功了一瞬间又失败」。
-         *
-         * 复用是安全的：同一通道同一时刻只应有一路 SDK 取流，
-         * 编码与通道号都没变，返回已有句柄即可。
          */
         LiveStream existing = running.get(key);
         if (existing != null && existing.realPlay().active()) {
-            log.info("大华 SDK 取流已在运行，复用: {} codec={} 累计帧={}",
-                    key, existing.publisher().codecName() == 0 ? "H264" : "H265",
-                    existing.publisher().frames());
-            return existing;
+            if (existing.streamNumber() == wantStream) {
+                log.info("大华 SDK 取流已在运行，复用: {} 码流={} codec={} 累计帧={}",
+                        key, wantStream == 0 ? "主" : "子",
+                        existing.publisher().codecName() == 0 ? "H264" : "H265",
+                        existing.publisher().frames());
+                return existing;
+            }
+            /*
+             * 码流不同：必须拆重建。
+             *
+             * <p>不复用也不能「先改 rType」—— 码流类型是
+             * {@code CLIENT_RealPlayByDataType} 入参，只在开始取流时生效，
+             * 已经在跑的句柄改不了。所以先停旧句柄与旧发布器，再重新取流。
+             *
+             * <p>旧发布器必须一并关掉：ZLM 的媒体源路径仍是 {@code deviceId/channel}，
+             * 不关的话两路流会往同一个媒体源里写，画面会花。
+             */
+            log.info("大华 SDK 码流切换，重建取流: {} {} -> {}",
+                    key, existing.streamNumber() == 0 ? "主码流" : "子码流",
+                    wantStream == 0 ? "主码流" : "子码流");
+            stop(key);
+        } else {
+            // 句柄已失效（设备重连过）：清掉残留再重建
+            stop(key);
         }
-        // 句柄已失效（设备重连过）：清掉残留再重建
-        stop(key);
 
         int sdkChannel = sdkChannelOf(session, deviceId, channel);
 
@@ -133,7 +152,8 @@ public class DahuaSdkStreamService {
             // dataType 只作诊断用（H265 也可能报 1004），编码由发布器从 NAL 头判定
             play = capability.ext().startRealPlay(session, sdkChannel, key,
                     (es, dataType) -> publisher.push(es),
-                    audioCodec() == 0 ? null : (audio, dataType) -> publisher.pushAudio(audio));
+                    audioCodec() == 0 ? null : (audio, dataType) -> publisher.pushAudio(audio),
+                    wantStream == 0 ? DahuaExtAccess.MAIN_STREAM : DahuaExtAccess.SUB_STREAM);
         } catch (RuntimeException e) {
             publisher.close();
             throw BizException.badRequest("大华 SDK 取流失败：" + e.getMessage());
@@ -173,13 +193,34 @@ public class DahuaSdkStreamService {
                     "大华 SDK 取流超时：已登录设备但 " + FIRST_FRAME_WAIT_MS + "ms 内" + why);
         }
 
-        LiveStream live = new LiveStream(key, deviceId, channel, play, publisher);
+        LiveStream live = new LiveStream(key, deviceId, channel, play, publisher, wantStream);
         running.put(key, live);
         lastViewerAt.remove(key);
-        log.info("大华 SDK 取流已启动: {} 通道={} codec={} 视频帧={} 音频帧={}",
-                key, sdkChannel, publisher.codecName() == 0 ? "H264" : "H265",
+        log.info("大华 SDK 取流已启动: {} 通道={} 码流={} codec={} 视频帧={} 音频帧={}",
+                key, sdkChannel, wantStream == 0 ? "主" : "子",
+                publisher.codecName() == 0 ? "H264" : "H265",
                 publisher.frames(), publisher.audioFrames());
         return live;
+    }
+
+    /**
+     * 决定本次取哪一路码流。
+     *
+     * <p>口径与国标链路一致（{@code StreamService#resolveStreamNumber}）：
+     * 请求显式值 &gt; 设备配置的码流索引 &gt; 主码流。
+     * 大华没有「域内自增序号」那种自动行为，所以「自动」等同于主码流。
+     */
+    private int resolveStreamNumber(GbDevice device, Integer requested) {
+        if (requested != null && requested >= 0) {
+            return requested;
+        }
+        if (device == null || device.getStreamIndex() == null) {
+            return 0;
+        }
+        int n = io.github.rurulalanana.starter.common.StreamIndex
+                .of(device.getStreamIndex()).getStreamNumber();
+        // StreamIndex 的 AUTO 返回 -1，大华没有自动取流，按主码流兜底
+        return n < 0 ? 0 : n;
     }
 
     /**

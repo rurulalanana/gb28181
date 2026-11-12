@@ -46,6 +46,22 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class DahuaExtAccess {
 
+    /**
+     * 主码流（{@code NET_RealPlayType.NET_RType_Realplay_0}）。
+     *
+     * <p>用它而不是 {@code NET_RType_Realplay}(0)：后者只表达「实时预览」，
+     * 具体码流由设备按默认策略决定；显式写 2/3 才拿得准是哪一路。
+     */
+    public static final int MAIN_STREAM = NetSDKLib.NET_RealPlayType.NET_RType_Realplay_0;
+
+    /**
+     * 子码流（{@code NET_RealPlayType.NET_RType_Realplay_1}，SDK 文档称「从码流 1」）。
+     *
+     * <p>设备还有从码流 2/3（{@code Realplay_2/3}），监控场景基本只用主/子两路，
+     * 界面上也只给这两个选项，所以这里不再展开。
+     */
+    public static final int SUB_STREAM = NetSDKLib.NET_RealPlayType.NET_RType_Realplay_1;
+
     private static final Charset GBK = Charset.forName("GBK");
 
     /** 单次抓图允许的最大字节数（4K JPEG 通常 < 2 MB）。 */
@@ -1306,6 +1322,34 @@ public final class DahuaExtAccess {
      */
     public RealPlay startRealPlay(DahuaSdk.Session session, int channel, String key,
                                   StreamListener listener, AudioListener audioListener) {
+        return startRealPlay(session, channel, key, listener, audioListener, MAIN_STREAM);
+    }
+
+    /**
+     * 按指定码流取流。
+     *
+     * <h3>为什么码流要走 {@code rType} 而不是改通道号</h3>
+     * 大华 SDK 把「哪一路码流」放在 {@code NET_IN_REALPLAY_BY_DATA_TYPE.rType}
+     * （{@link NetSDKLib.NET_RealPlayType}）：
+     * <pre>
+     *   NET_RType_Realplay_0 = 2   主码流
+     *   NET_RType_Realplay_1 = 3   从码流 1（即界面上的「子码流」）
+     *   NET_RType_Realplay_2 = 4   从码流 2
+     *   NET_RType_Realplay_3 = 5   从码流 3
+     * </pre>
+     * <b>不能</b>靠「通道号 +1」取子码流：{@code nChannelID} 标识的是摄像机本身，
+     * IPC 多写 1 会直接报 {@code 0x80000007}（参数不合法）——
+     * 这正是早期平台在子码流上踩过的坑。
+     *
+     * <p>早先这里写死 {@code rType = 0}（{@code NET_RType_Realplay}，等价于主码流），
+     * 于是界面上切「子码流」对 SDK 设备完全无效：请求下去了，拿回来的还是主码流，
+     * 带宽一点没降。
+     *
+     * @param streamType {@link #MAIN_STREAM} 或 {@link #SUB_STREAM}
+     */
+    public RealPlay startRealPlay(DahuaSdk.Session session, int channel, String key,
+                                  StreamListener listener, AudioListener audioListener,
+                                  int streamType) {
         NetSDKLib sdk = requireSdk();
         NetSDKLib.NET_IN_REALPLAY_BY_DATA_TYPE in = new NetSDKLib.NET_IN_REALPLAY_BY_DATA_TYPE();
         in.nChannelID = channel;
@@ -1327,7 +1371,12 @@ public final class DahuaExtAccess {
          * 官方 demo（RealPlayModule.realPlayByDataType）用的就是 Ex2 版本。
          */
         in.cbRealDataEx = REAL_DATA_CALLBACK;
-        in.rType = 0;        // 0 = 实时
+        /*
+         * 码流类型。2 = NET_RType_Realplay_0（主码流）、3 = NET_RType_Realplay_1（从码流 1）。
+         * 不用 0（NET_RType_Realplay）：它只表达「实时预览」，部分固件下码流由设备按
+         * 默认策略定，显式写 2/3 才拿得准。
+         */
+        in.rType = streamType;
         in.emAudioType = 0;  // 0 = 默认音频（与官方 demo 一致）
         in.nMP4Type = 0;     // 非 MP4 必须给 0，否则部分固件拒绝
         in.write();
@@ -1347,7 +1396,8 @@ public final class DahuaExtAccess {
         if (audioListener != null) {
             AUDIO_LISTENERS.put(id, audioListener);
         }
-        log.info("SDK 取流已开始: {} 通道={} handle={} 音频={}", key, channel, id,
+        log.info("SDK 取流已开始: {} 通道={} 码流={} handle={} 音频={}", key, channel,
+                streamType == SUB_STREAM ? "子码流" : "主码流", id,
                 audioListener != null ? "订阅" : "不订阅");
         return new RealPlay(this, handle, key);
     }

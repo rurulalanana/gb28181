@@ -64,13 +64,13 @@ public class DahuaMediaProvider implements DeviceMediaProvider {
     @Override
     public StreamHandle start(String deviceId, String channelId, Integer streamNumber) {
         if (sdkStream.available(deviceId)) {
-            return startSdk(deviceId, channelId);
+            return startSdk(deviceId, channelId, streamNumber);
         }
         return startRtspProxy(deviceId, channelId, streamNumber);
     }
 
     /** SDK 取流：首帧已就绪，可直接返回。 */
-    private StreamHandle startSdk(String deviceId, String channelId) {
+    private StreamHandle startSdk(String deviceId, String channelId, Integer streamNumber) {
         /*
          * SDK 会话恢复后可能还留着上次的 RTSP 代理玩家（同一个 app/stream）。
          * 两个来源同时往一个媒体源推会互相打架，所以先解掉代理。
@@ -81,7 +81,7 @@ public class DahuaMediaProvider implements DeviceMediaProvider {
                 media.stopProxy(deviceId, channelId);
             }
         }
-        DahuaSdkStreamService.LiveStream live = sdkStream.start(deviceId, channelId);
+        DahuaSdkStreamService.LiveStream live = sdkStream.start(deviceId, channelId, streamNumber);
         return new StreamHandle(live.app(), live.stream(), StreamService.TRANSPORT_SDK);
     }
 

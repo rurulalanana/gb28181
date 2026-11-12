@@ -185,6 +185,19 @@ public class WritePermissionInterceptor implements HandlerInterceptor {
         m.put("/api/v1/user", new Rule(Permissions.USER_READ, Permissions.USER_WRITE));
         m.put("/api/v1/system", new Rule(Permissions.SYSTEM_READ, Permissions.SYSTEM_WRITE));
         m.put("/api/v1/oplog", new Rule(Permissions.OPLOG_READ, Permissions.OPLOG_CLEAR));
+        /*
+         * AI 视觉（检测通道增删、场景切换、启停）。
+         *
+         * <p>此前这一整块<b>没有规则</b>，写请求落到「未匹配」分支，
+         * 只要求「具备任意一项写权限」就放行 ——
+         * 也就是说只有 alarm:write 的账号也能改所有通道的检测场景。
+         * 日志里每次改设置都会多一条
+         * 「写请求未匹配权限规则，已按「具备任意写权限」放行」。
+         *
+         * <p>归到频道能力域：检测是<b>按通道</b>配置的，读要 channel:read、
+         * 改要 channel:write，与改通道名称同级。
+         */
+        m.put("/api/v1/vision", new Rule(Permissions.CHANNEL_READ, Permissions.CHANNEL_WRITE));
         return Map.copyOf(m);
     }
 
