@@ -551,13 +551,24 @@ async function play() {
     0
   )
   /*
-   * 地址校验与其他视图同一口径（hasPlayUrl）：只要有一路可用就往下走。
-   * 早先这里写成「wsFlv/httpFlv/hls 都没有就报错」，忘了 WebRTC ——
-   * 手机端固定走 WebRTC，恰好没有 FLV/HLS 时就会误报「拿不到播放地址」。
+   * 判「有没有得播」要看的是「任意一路地址可用」，不能只看当前所选协议。
+   *
+   * <p><b>这里曾经被我改错成 {@code hasPlayUrl(wantedProto, urls)}，直接导致
+   * /play?serial=...&code=... 打不开。</b>原因是分享接口
+   * （{@code GET /api/v1/share/live}）只返回 FLV / HLS / RTMP / RTSP，
+   * <b>不返回 webrtc</b> —— WebRTC 的地址是前端用 stream id 自己拼的
+   * （见 {@code useLivePlayer#webrtcUrlOf}，走 {@code /api/v1/webrtc/srs}），
+   * 根本不需要后端给。于是 {@code hasPlayUrl('webrtc', urls)} 恒为 false，
+   * 桌面端默认协议恰好是 webrtc，一进页面就报「暂时拿不到播放地址」。
+   *
+   * <p>所以：webrtc 只要拿得到 stream id 就认为可用；其余协议看地址。
    */
   const phone = isMobileClient()
   const wantedProto = phone ? LIVE_DEFAULT_PROTOCOL : proto.value
-  if (!hasPlayUrl(wantedProto, urls)) {
+  const canPlay = wantedProto === 'webrtc'
+    ? Boolean(data.deviceId && data.channelId)
+    : hasPlayUrl(wantedProto, urls)
+  if (!canPlay) {
     notice.value = notice.value || '暂时拿不到播放地址，请稍后重试'
     return
   }
