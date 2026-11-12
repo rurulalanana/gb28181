@@ -743,12 +743,15 @@ async function play(row, opts = {}) {
        * 媒体时间轴突变校正：段内位置 = positionOffset + 媒体时间，
        * 媒体自己跳了 N 秒就要把 offset 反向退掉 N 秒，否则跳转被计入两次。
        *
-       * <p>现在定位统一走重新 INVITE（见 {@link #flushSeek}），主动 seek 不会再改 offset；
-       * 这里保留是为了应付「设备自己跳了一段」（推流端重启、流异常重推）——
-       * 那种情况下时间轴会突然前移，不退 offset 就会与画面对不上。
+       * <p><b>只校正「前移」（delta &gt; 0）。</b>时间轴变小只可能发生在重新 INVITE
+       * 换流的时候（新 MediaStream 的 currentTime 从 0 开始），而那时
+       * positionOffset 已按 INVITE 的 {@code t=} 设好，再退一次反而把进度条推到更晚，
+       * 表现就是「拖了位置又不对」。
        */
       onJump: (delta) => {
-        positionOffset.value = Math.max(0, (positionOffset.value || 0) - delta)
+        if (delta > 0) {
+          positionOffset.value = Math.max(0, (positionOffset.value || 0) - delta)
+        }
         clearSeeking()
       }
     }
@@ -884,8 +887,17 @@ async function rebuildStream() {
     return
   }
   stallRetry++
-  // 重拉后从原来的位置接着看（靠 INVITE 的 t= 定位，不依赖设备 npt）
-  await restartAt(Math.floor(player.position.value || 0))
+  /*
+   * 重拉后从「当前看到的画面」接着看。
+   *
+   * <p><b>必须用 {@link #playPosition}（段内位置），不能用 {@code player.position}。</b>
+   * 后者是媒体时间轴的原始值：从段中间起播时它是 0，而段内位置 = positionOffset + 它。
+   * 早先这里直接传了 {@code player.position}，于是拖到 9:14 后只要起播看门狗
+   * 碰一次（重新 INVITE 本来就要 2~3 秒，很容易超时），就会
+   * {@code restartAt(0)} → 从段起点（8:00）重推 —— 用户看到的就是
+   * 「拖到 9:14，它自己给我回到 8 点」。
+   */
+  await restartAt(Math.floor(playPosition.value || 0))
 }
 
 /* ==================== 录像下载 ==================== */
