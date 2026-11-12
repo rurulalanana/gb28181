@@ -643,6 +643,22 @@ export function useLivePlayer(containerRef, hooks = {}) {
    * /api/v1/webrtc/srs（WebRtcController#srsWhep），协议头换完恰好命中。
    * HTTPS 页面必须用 webrtcs://，否则替换后是 http:// 会被混合内容拦掉。
    *
+   * <h3>控制台那条 {@code ERR_UNKNOWN_URL_SCHEME} 是无害的</h3>
+   * 每次起播都会看到一条
+   * {@code GET webrtc://<host>/api/v1/webrtc/srs?... net::ERR_UNKNOWN_URL_SCHEME}。
+   * 那是 video.js 在 Webrtc tech 就绪前，先把地址当普通 URL 试了一次 src。
+   *
+   * <p>它<b>不代表 WebRTC 失败</b>。实测（2026-11-12，PlaybackView）同一时刻：
+   * <pre>
+   *   player.options_.techOrder = ["webrtc","html5"]
+   *   player.techName_          = "Webrtc"
+   *   video.srcObject           = MediaStream（audio + video 两轨）
+   *   video.src                 = null
+   * </pre>
+   * 判据要看 {@code video.srcObject}：WebRTC 走 MediaStream，src 本来就是 null；
+   * 只看 {@code video.src} 会得出「WebRTC 没工作、靠 WS-FLV 兜底」的错误结论
+   * （这个误判真实发生过）。
+   *
    * @param {string} streamId `<设备编码>/<通道编码>`
    * @returns {string} 非浏览器环境返回空串
    */

@@ -356,6 +356,28 @@ export class LivePlayerEngine {
       // 跳过按 16:9 算 padding-bottom 的分支，直接给内层 100%×100%
       aspect: '100%',
       /*
+       * 不要在这里传 {@code webrtc} —— 组件的 props 里没有它。
+       *
+       * <p>组件判断「是不是 WebRTC」用的是自己的 computed：
+       * {@code webrtc:function(){return 0===(this.src||"").indexOf("webrtc")}}，
+       * 即按 {@code videoUrl} 的前缀自动判定。传进来的同名属性只会落到
+       * {@code $attrs}，既不生效也不报错，容易被误读成「已经显式指定过了」。
+       *
+       * <p>实测确认（2026-11-12，PlaybackView + WebRTC 回放）：
+       * <pre>
+       *   player.options_.techOrder = ["webrtc","html5"]
+       *   player.techName_          = "Webrtc"
+       *   video.srcObject           = MediaStream（audio + video 两轨）
+       * </pre>
+       * 也就是说这条通路本来就走的 Webrtc tech。
+       *
+       * <p>控制台里每次起播会有一条
+       * {@code GET webrtc://... net::ERR_UNKNOWN_URL_SCHEME} ——
+       * 那是 video.js 在 tech 就绪前把地址当普通 src 试了一次，<b>无害</b>，
+       * 与「WebRTC 不可用」无关。排障时别看 {@code video.src}（它是 null），
+       * 要看 {@code video.srcObject}。
+       */
+      /*
        * FLV 通路必须显式 false（原因见类注释）；
        * WebRTC 不能传 false：PCMA/PCMU 由浏览器原生解码，关掉就变成无声播放。
        */
