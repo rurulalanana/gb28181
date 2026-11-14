@@ -49,9 +49,10 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     <!--
-      编译目标由父工程统一为 17（maven.compiler.release=17）。
+      编译目标由父工程统一为 21（根 pom 的 java.version → maven.compiler.release）。
+      本模块不写自己的版本号：父 pom 是唯一来源，子模块写了会覆盖成两套口径。
       不再写 maven.compiler.source/target：release 会同时校验语法级别与平台 API，
-      能拦住「本地 JDK 21 编译通过、目标 JDK 17 上 NoSuchMethodError」这类问题。
+      能拦住「本地 JDK 21 编译通过、目标 JDK 21 上 NoSuchMethodError」这类问题。
     -->
 
     <lombok.version>1.18.30</lombok.version>
