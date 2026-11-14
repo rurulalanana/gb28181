@@ -4,16 +4,20 @@ import io.github.rurulalanana.starter.service.RecordUrlSigner;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
 import org.springframework.http.CacheControl;
 import org.springframework.web.servlet.HandlerInterceptor;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
-import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+import org.springframework.web.servlet.resource.PathResourceResolver;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.regex.Pattern;
 
 /**
  * 前端单页应用（SPA）路由回退。Vue Router 用 history 模式，直接访问 {@code /dashboard} 等路由时
@@ -31,9 +35,87 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
      * {@code webjars}/{@code swagger-ui}/{@code v3} 属接口文档：Knife4j 的界面在 {@code /doc.html}，
      * 脚本样式在 {@code /webjars/**}。漏了 webjars 的症状是「doc.html 打得开但白屏」——
      * 资源请求被兜底规则吞掉返回 index.html，浏览器按 JS 解析直接语法错误。
+     *
+     * <p><b>必须带 {@code (?:/|$)} 边界</b>：这个串被直接嵌进负向前瞻，
+     * 没有边界就是<b>纯前缀匹配</b>。{@code api} 会吃掉 {@code /apikeys}、
+     * {@code record} 会吃掉 {@code /recordings}、{@code error} 会吃掉 {@code /errors}，
+     * {@code js} 会吃掉 {@code /jsapi} —— 这些路径会被当成静态资源，
+     * 不走 SPA 兜底，浏览器刷新直接 404。
+     *
+     * <p>路由由后端 {@code gb_menu} 表驱动，「菜单管理」里新配的路径就是
+     * 用户可触发的地雷，所以边界必须现在就加上，而不是等现场报了 404 再查。
      */
     private static final String STATIC_PREFIXES =
-            "api|assets|record|error|jessibuca|js|webjars|swagger-ui|v3";
+            "(?:api|assets|record|error|jessibuca|js|webjars|swagger-ui|v3|locales|static)(?:/|$)";
+
+    /**
+     * 单段 SPA 兜底的正则（{@code {path:...}} 里那一段）。
+     *
+     * <p>抽成方法是为了能单测：前缀匹配有没有词边界，只能靠断言具体路径来验证。
+     *
+     * <p><b>它只用于「首段是否算静态资源前缀」的判定</b>，不要再塞回
+     * {@code registry.addViewController("/{path:" + ... + "}")}：Spring Boot 3 的
+     * {@code PathPatternParser} 不允许捕获变量的正则里出现 {@code /}
+     * （本正则的 {@code (?:/|$)} 边界就带斜杠），启动时直接报
+     * {@code Invalid mapping pattern detected ... Expected close capture character}，
+     * 整站起不来。兜底改由 {@link SpaFallbackResourceResolver} 在资源解析阶段完成。
+     */
+    static String spaFallbackRegex() {
+        return "^(?!" + STATIC_PREFIXES + ")[^\\.]*$";
+    }
+
+    /** 编译一次，资源解析是热路径。 */
+    private static final Pattern SPA_FIRST_SEGMENT = Pattern.compile(spaFallbackRegex());
+
+    /**
+     * 这个资源路径是否应该回退到 {@code index.html}（即「前端路由」）。
+     *
+     * <p>两条判据缺一不可：
+     * <ul>
+     *   <li>首段不在静态资源前缀表里 —— 否则 {@code /api/v1/login} 会被换成 HTML；
+     *       前缀表用 {@link #spaFallbackRegex()} 判，保证 {@code apikeys}、{@code recordings}
+     *       这类「前缀 + 更多字符」不会被误伤（有单测盯住）；</li>
+     *   <li>末段不含点号 —— 带扩展名的是资源请求，找不到文件就该 404，
+     *       而不是回一张 index.html（浏览器按 JS 解析直接语法错误）。</li>
+     * </ul>
+     */
+    static boolean isSpaRoute(String resourcePath) {
+        if (resourcePath == null || resourcePath.isEmpty()) {
+            return false;
+        }
+        String path = resourcePath.startsWith("/") ? resourcePath.substring(1) : resourcePath;
+        int slash = path.indexOf('/');
+        String first = slash < 0 ? path : path.substring(0, slash);
+        String last = path.substring(path.lastIndexOf('/') + 1);
+        if (first.isEmpty() || last.isEmpty()) {
+            return false;
+        }
+        return SPA_FIRST_SEGMENT.matcher(first).matches() && !last.contains(".");
+    }
+
+    /**
+     * SPA 兜底解析器。
+     *
+     * <p>为什么不用 {@code addViewControllers}：见 {@link #spaFallbackRegex()} 的注释 ——
+     * PathPattern 不接受带斜杠的捕获正则。放在资源解析阶段还有个额外好处：
+     * 它的优先级天然低于所有 {@code @RequestMapping}、WebSocket 握手和更具体的
+     * 静态资源 handler（{@code /assets/**}、{@code /js/**}、{@code /record/**}），
+     * 只有「确实没有这个文件」时才会被问到，不会抢走接口或播放器脚本的请求。
+     */
+    static class SpaFallbackResourceResolver extends PathResourceResolver {
+
+        @Override
+        protected Resource getResource(String resourcePath, Resource location) throws IOException {
+            // 先交给父类做存在性检查与 ../ 越界拦截，命中就正常返回文件
+            Resource found = super.getResource(resourcePath, location);
+            if (found != null) {
+                return found;
+            }
+            return isSpaRoute(resourcePath)
+                    ? new ClassPathResource("static/index.html")
+                    : null;
+        }
+    }
 
     private final Gb28181Properties props;
 
@@ -125,6 +207,9 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
                         .setCacheControl(CacheControl.maxAge(Duration.ofHours(1)).cachePublic());
             }
         }
+
+        // 兜底必须最后注册，见 addSpaFallback 的注释
+        addSpaFallback(registry);
     }
 
     /** 解析录像根目录（绝对路径）。 */
@@ -154,22 +239,28 @@ public class SpaWebConfiguration implements WebMvcConfigurer {
         }
     }
 
-    @Override
-    public void addViewControllers(ViewControllerRegistry registry) {
-        // 一级路由（前端菜单路径）
-        String[] routes = {
-                "dashboard", "live", "control", "devices", "channels", "playback",
-                "cloud", "alarms", "cascade", "users", "roles", "menus", "oplogs", "settings",
-                // 免登录的对外页面：直播分享页（对齐 CMS 的 play.html）与 iframe 嵌入测试页
-                "play", "iframe-test"
-        };
-        for (String route : routes) {
-            registry.addViewController("/" + route).setViewName("forward:/index.html");
-        }
-        // 未知前端路由（如带参数的子路径）兜底
-        registry.addViewController("/{path:^(?!" + STATIC_PREFIXES + ")[^\\.]*$}")
-                .setViewName("forward:/index.html");
-        registry.addViewController("/{path:^(?!" + STATIC_PREFIXES + ")[^\\.]*$}/**")
-                .setViewName("forward:/index.html");
+    /**
+     * 把前端路由交给 {@link SpaFallbackResourceResolver} 兜底。
+     *
+     * <p>必须**最后**注册：同一个 {@code SimpleUrlHandlerMapping} 里，
+     * 更具体的模式（{@code /assets/**}、{@code /js/**}、{@code /webjars/**}、
+     * {@code /record/**}）优先匹配，{@code /**} 只是兜底。
+     *
+     * <p>资源目录带上 Spring Boot 默认的那几个（{@code /public/}、{@code /resources/}、
+     * {@code /META-INF/resources/}）：knife4j 的 {@code /doc.html} 就住在
+     * {@code META-INF/resources} 下，只配 {@code classpath:/static/} 会把它弄丢。
+     */
+    private void addSpaFallback(ResourceHandlerRegistry registry) {
+        registry.addResourceHandler("/**")
+                .addResourceLocations(
+                        "classpath:/static/",
+                        "classpath:/public/",
+                        "classpath:/resources/",
+                        "classpath:/META-INF/resources/")
+                // 回退出的 index.html 必须回源协商：发版后用户不能还拿着旧 index.html
+                // 去引用已被 emptyOutDir 删掉的旧 chunk
+                .setCacheControl(CacheControl.noCache().mustRevalidate())
+                .resourceChain(false)
+                .addResolver(new SpaFallbackResourceResolver());
     }
 }
