@@ -9,7 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 大华喊话 / 对讲会话管理。
@@ -73,7 +73,13 @@ public class DahuaTalkService {
     /** deviceId → 当前占用者。 */
     private final Map<String, Holder> active = new ConcurrentHashMap<>();
 
-    private final AtomicLong seq = new AtomicLong();
+    /**
+     * deviceId → 启动对讲用的设备级锁。
+     *
+     * <p>只创建不删除：数量上限就是设备数，相比每次 start 都新建/销毁锁
+     * 带来的竞态风险，这点常驻内存可以忽略。
+     */
+    private final Map<String, ReentrantLock> startLocks = new ConcurrentHashMap<>();
 
     public DahuaTalkService(DahuaCapabilityService dahuaCapability) {
         this.dahuaCapability = dahuaCapability;
@@ -90,10 +96,44 @@ public class DahuaTalkService {
      * @param owner    占用者标识（登录用户名），用于给出「谁在喊话」的提示
      */
     public Session start(String deviceId, String owner) {
+        /*
+         * 必须在设备级锁里完成「查占用 → 建通道 → 登记」这一整段，否则并发首启会漏掉一路 TalkChannel。
+         *
+         * <p><b>不加锁时的竞态</b>：两个线程同时 {@code active.get()} 都拿到 null、
+         * 都跳过「已占用」判断，各自 {@code StartTalkEx}，然后各自 {@code active.put()} ——
+         * 后写的把先写的覆盖掉。被覆盖的那路 TalkChannel 永远不会 {@code close()}，
+         * <b>原生句柄泄漏</b>，而且设备侧两路对讲同时占麦。
+         *
+         * <p>注意下面的「覆盖已过期会话」分支<b>不能替代</b>这个锁：它只处理
+         * 「已有 holder 且已过期」的串行场景，管不住「两个线程都看到空位」。
+         *
+         * <p><b>为什么用 ReentrantLock 而不是 {@code ConcurrentHashMap.compute}</b>：
+         * compute 的映射函数里做阻塞 I/O（{@code StartTalkEx} 是原生调用，慢时几百毫秒）
+         * 会 pin 住虚拟线程的载体线程，把平台吞吐拖垮 ——
+         * 与工作区约定「不要在 computeIfAbsent 里做数据库查询」同一个原因。
+         *
+         * <p>锁按 deviceId 分段，不同设备仍可并发对讲。
+         */
+        ReentrantLock lock = startLocks.computeIfAbsent(deviceId, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            return startLocked(deviceId, owner);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** {@link #start} 的实际逻辑，由设备级锁保护，不是线程安全的独立入口。 */
+    private Session startLocked(String deviceId, String owner) {
         purgeExpired();
-        String key = deviceId;
-        Holder holder = active.get(key);
-        if (holder != null && !holder.expired()) {
+        Holder holder = active.get(deviceId);
+        if (holder != null && holder.expired()) {
+            // 覆盖前必须 StopTalkEx：否则旧 TalkChannel 的原生句柄泄漏，设备侧会一直占麦
+            closeQuietly(holder);
+            active.remove(deviceId, holder);
+            holder = null;
+        }
+        if (holder != null) {
             // 同一人重复点「开始」：返回已有会话而不是报错（前端可能重连）
             if (holder.owner().equals(owner)) {
                 holder.touch();
@@ -104,7 +144,8 @@ public class DahuaTalkService {
         }
 
         var session = dahuaCapability.requireSession(deviceId);
-        String talkId = "talk-" + seq.incrementAndGet();
+        // 不能用顺序号：任何已登录用户猜到 talk-1/talk-2 就能订阅别人的对讲、收听设备音频。
+        String talkId = "talk-" + java.util.UUID.randomUUID().toString().replace("-", "");
         // 先建 Holder 再开通道：listener 要立刻能用，而通道构造期间就可能开始回调
         Holder h = new Holder(talkId, deviceId, owner, System.currentTimeMillis());
         DahuaExtAccess.TalkChannel channel;
@@ -116,9 +157,30 @@ public class DahuaTalkService {
             throw dahuaCapability.translate("建立对讲", e);
         }
         h.setChannel(channel);
-        active.put(key, h);
+        active.put(deviceId, h);
         log.info("大华对讲已建立: device={} talkId={} owner={}", deviceId, talkId, owner);
         return new Session(talkId, deviceId, owner);
+    }
+
+    /**
+     * 校验「当前登录用户是否有权使用这个对讲会话」。
+     *
+     * <p>抽成无依赖纯函数是为了能离线单测：{@link #start} 会真的走 SDK 登录设备，
+     * 设备不通时测出来的红是网络问题而不是鉴权逻辑。talkId 随机化之后仍要校验 owner，
+     * 因为会话 id 可能从浏览器历史、日志、分享链接里泄露。
+     *
+     * @throws BizException 会话不存在或不属于该用户
+     */
+    static void assertOwnership(String owner, String loginId, String talkId) {
+        if (talkId == null || talkId.isBlank()) {
+            throw BizException.badRequest("对讲会话不存在或已结束");
+        }
+        if (loginId == null || loginId.isBlank()) {
+            throw BizException.badRequest("登录已失效，请重新登录");
+        }
+        if (owner == null || !loginId.equals(owner)) {
+            throw BizException.badRequest("无权使用该对讲会话");
+        }
     }
 
     /**
@@ -131,10 +193,13 @@ public class DahuaTalkService {
      * 不能在里面做网络 IO 阻塞（会拖住 SDK 的音频泵）。
      * WebSocket 侧用「投递到会话自己的发送队列」实现，见 {@code DahuaTalkWebSocketHandler}。
      *
+     * @param loginId 当前登录用户，用于校验会话归属；由调用方传入而<b>不在本方法内部取</b>
+     *                （WebSocket 回调线程上没有 Sa-Token 请求上下文）
      * @return 取消订阅的句柄，连接断开时必须调用
      */
-    public AutoCloseable subscribe(String talkId, java.util.function.Consumer<byte[]> sink) {
+    public AutoCloseable subscribe(String talkId, java.util.function.Consumer<byte[]> sink, String loginId) {
         Holder h = byTalkId(talkId);
+        assertOwnership(h.owner(), loginId, talkId);
         h.addSink(sink);
         return () -> h.removeSink(sink);
     }
@@ -218,11 +283,18 @@ public class DahuaTalkService {
     /**
      * 发一帧音频。
      *
-     * @param talkId 由 {@link #start} 返回
-     * @param pcm    裸 PCM（8 kHz / 16 bit / 单声道）
+     * <p>{@code loginId} 由调用方从登录态取（HTTP 走 {@code StpUtil.getLoginId()}，
+     * WebSocket 走握手时缓存的 loginId），<b>不在本方法内部取</b>：
+     * 两处上下文不同，从本方法里取会在 WebSocket 回调线程上抛
+     * {@code SaTokenContextException}，而报错信息与对讲毫无关系，极难排查。
+     *
+     * @param talkId  由 {@link #start} 返回
+     * @param pcm     裸 PCM（8 kHz / 16 bit / 单声道）
+     * @param loginId 当前登录用户，用于校验会话归属
      */
-    public void send(String talkId, byte[] pcm) {
+    public void send(String talkId, byte[] pcm, String loginId) {
         Holder h = byTalkId(talkId);
+        assertOwnership(h.owner(), loginId, talkId);
         if (h.expired()) {
             close(talkId);
             throw BizException.badRequest("对讲已超时释放，请重新开始");

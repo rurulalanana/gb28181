@@ -629,7 +629,7 @@ public class DahuaController {
         if (pcm == null || pcm.length == 0) {
             throw BizException.badRequest("音频数据为空");
         }
-        talkService.send(talkId, pcm);
+        talkService.send(talkId, pcm, String.valueOf(StpUtil.getLoginId()));
         return ApiResponse.ok();
     }
 

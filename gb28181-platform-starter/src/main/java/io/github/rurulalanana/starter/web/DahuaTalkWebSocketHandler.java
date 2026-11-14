@@ -79,10 +79,15 @@ public class DahuaTalkWebSocketHandler extends BinaryWebSocketHandler {
             try {
                 loginId = StpUtil.getLoginIdByToken(token);
             } catch (Exception e) {
-                log.debug("对讲 WebSocket 校验 token 异常: {}", e.toString());
+                // getLoginIdByToken 对无效 token 返回 null 而不抛异常，所以拒绝分支才是主要路径
+                log.warn("对讲 WebSocket token 校验异常: ip={} err={}",
+                        session.getRemoteAddress(), e.toString());
             }
         }
         if (loginId == null) {
+            // 未授权接入必须留即时审计行：只靠 afterConnectionClosed 的 INFO 要等 socket 真正关闭
+            log.warn("对讲 WebSocket 鉴权失败: ip={} talkId={} tokenPresent={}",
+                    session.getRemoteAddress(), talkId, token != null && !token.isBlank());
             closeQuietly(session, CloseStatus.POLICY_VIOLATION,
                     "登录已失效，请重新登录后再收听");
             return;
@@ -94,7 +99,8 @@ public class DahuaTalkWebSocketHandler extends BinaryWebSocketHandler {
         }
 
         try {
-            AutoCloseable handle = talkService.subscribe(talkId, pcm -> dispatch(session, pcm));
+            AutoCloseable handle = talkService.subscribe(talkId,
+                    pcm -> dispatch(session, pcm), String.valueOf(loginId));
             subscriptions.put(session.getId(), handle);
             log.info("对讲收听已连接: talkId={} user={} session={}", talkId, loginId, session.getId());
         } catch (Exception e) {
@@ -105,7 +111,7 @@ public class DahuaTalkWebSocketHandler extends BinaryWebSocketHandler {
 
     @Override
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) {
-        // 上行音频走 HTTP（/talk/send）：那里有现成的鉴权、限流与错误回显，
+        // 上行音频走 HTTP（/talk/send）：那里有现成的鉴权与错误回显（当前没有独立限流，
         // 也避免 WebSocket 双向流量互相干扰。这里收到数据只当客户端写错了地方。
         log.debug("忽略对讲 WebSocket 的上行数据: session={} bytes={}",
                 session.getId(), message.getPayloadLength());
