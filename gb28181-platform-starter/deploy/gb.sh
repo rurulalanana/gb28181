@@ -65,6 +65,14 @@ fi
 # 服务器上 PostgreSQL 是 5432，profile 里已配好
 SPRING_PROFILE="server"
 
+# AI 检测配置：application-vision.yml 放在 jar 同目录 Spring Boot 不会自动读，
+# 必须显式挂到 config search path。早期只写了「见 VISION_CONFIG 变量」的注释、
+# 脚本里却没有引用，结果线上 vision.enabled 一直是 false（AI 检测等于没开）。
+VISION_CONFIG=""
+if [ -f "$APP_DIR/application-vision.yml" ]; then
+    VISION_CONFIG="--spring.config.additional-location=file:$APP_DIR/application-vision.yml"
+fi
+
 # 数据库密码不写进 application.yml（会被打进 jar 并提交到 Git 仓库），
 # 改由 .env 提供（权限 600，仅 root 可读），以环境变量注入。
 if [ -f "$APP_DIR/.env" ]; then
@@ -255,7 +263,8 @@ case "$1" in
             java $JAVA_OPTS -jar "$JAR" \
                 --spring.profiles.active=$SPRING_PROFILE \
                 --server.port="${GB_APP_PORT:-48088}" \
-                --spring.datasource.password="${GB_DB_PASSWORD:-}" >> "$LOG" 2>&1 &
+                --spring.datasource.password="${GB_DB_PASSWORD:-}" \
+                $VISION_CONFIG >> "$LOG" 2>&1 &
             java_pid=$!
             echo "$java_pid" > "$PID_FILE"
             wait "$java_pid"
