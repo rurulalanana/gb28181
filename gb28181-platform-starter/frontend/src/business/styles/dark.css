@@ -1,0 +1,112 @@
+/*
+ * 业务设计系统的深色模式。
+ *
+ * <p>框架的做法是：`useDataThemeChange.dataThemeChange()` 往 `<html>` 上加 `dark` 类，
+ * Element Plus 的 `dark/css-vars.css`（在 `src/style/dark.scss` 里 `@use`）负责组件层，
+ * **自定义页面的深色样式由自己补**（官方文档「主题和暗黑模式」第 3 步：自定义组件
+ * 支持暗黑模式的两种方式 —— Tailwind 的 `dark:` 前缀，或手写深色样式）。
+ *
+ * <p>本项目 22 个页面全靠 `src/business/styles/main.css` 里的一套 CSS 变量上色，
+ * 所以这里只做「令牌反相」：把中性色阶、表面色、描边、状态色翻过来，
+ * 页面不用改一行。值对齐 Element Plus 的深色基调（bg #141414 / overlay #1d1e1f /
+ * text #E5EAF3），避免业务面板和框架面板出现两种黑。
+ *
+ * <p>选择器用 `html.dark` 而不是 `.dark`：`:root`（0,1,0）与 `.dark`（0,1,0）同权重，
+ * 谁后加载谁生效；加上 `html` 变成（0,1,1），与加载顺序无关，稳定压过 main.css 的 `:root`。
+ */
+
+html.dark {
+  /*
+   * 中性色阶整体反相。
+   *
+   * <p>不能只改 `--text-*`：`--ink-*` 同时被当作文字色（`.gauge-value`、`.mono`）
+   * 和底色（表头、条纹、悬浮）用，两边一起反相才是自洽的。
+   */
+  --ink-900: #e8edf5;
+  --ink-800: #dbe2ec;
+  --ink-700: #c8d1dd;
+  --ink-600: #aeb9c7;
+  --ink-500: #9aa5b4;
+  --ink-400: #85909f;
+  --ink-300: #565f6b;
+  --ink-200: #434b55;
+  --ink-100: #333a43;
+  --ink-50: #23282f;
+
+  /* 纯白在深色下是「面板底色」：输入框、卡片、弹窗都靠它 */
+  --white: #1d1e1f;
+
+  --bg-app: #0f1115;
+  --bg-surface: #1d1e1f;
+  --bg-sunken: #17181a;
+
+  --line: #3a3f47;
+  --line-soft: #2b3038;
+  --border-color: var(--line);
+  --border-strong: #4c525c;
+
+  --text-primary: var(--ink-900);
+  --text-secondary: var(--ink-500);
+  --text-tertiary: var(--ink-400);
+
+  /*
+   * 状态色：500 档提亮保证深底上的对比度（原来的 #17914f 在 #1d1e1f 上只有约 2.6:1），
+   * 50 档改成深色底纹，标记与徽标的浅底才不会是刺眼的白块。
+   */
+  --online-500: #3fb950;
+  --online-50: #13261a;
+  --warning-500: #d29922;
+  --warning-50: #2a2109;
+  --danger-500: #f85149;
+  --danger-50: #2d1518;
+  --info-500: #9aa5b4;
+  --info-50: #23282f;
+
+  /* 阴影在深色下靠黑色叠加，亮度衰减比浅色更明显，需要更深 */
+  --sh-sm: 0 1px 2px rgb(0 0 0 / 60%);
+  --sh-md: 0 8px 24px rgb(0 0 0 / 55%);
+  --sh-lg: 0 14px 36px rgb(0 0 0 / 65%);
+  --sh-panel: 0 1px 2px rgb(0 0 0 / 50%);
+}
+
+/*
+ * 页面底色。
+ *
+ * <p>框架的 `dark.scss` 只把 `.app-main` 刷成 #020409，而业务页面自己还有一层
+ * `.page` / 卡片容器；不显式声明的话，深色下会出现「外深内白」的补丁块。
+ */
+html.dark body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+html.dark .app-main,
+html.dark .app-main-nofixed-header {
+  background: var(--bg-app) !important;
+}
+
+/*
+ * 应用外壳底板。
+ *
+ * <p>框架的 `sidebar.scss` 给 `.main-container` 铺了浅灰 #f0f2f5。深色下它被
+ * `.app-main` 盖住，平时看不见；但内容不足一屏或滚动回弹时会从边缘漏出来，
+ * 形成一道白边。深色下统一压成页面底色。
+ */
+html.dark .main-container {
+  background: var(--bg-app);
+}
+
+/* 表格固定列在做 hover 时用的是 EP 的变量，深色下要跟着表体一起变 */
+html.dark .el-table {
+  --el-table-bg-color: var(--bg-surface);
+  --el-table-tr-bg-color: var(--bg-surface);
+  --el-table-expanded-cell-bg-color: var(--bg-surface);
+}
+
+/*
+ * 视频容器保持纯黑：这是画面底色，不是面板。
+ * main.css 里的 #070a10 在深色下反而偏亮，这里压到接近纯黑，避免画面四周发灰。
+ */
+html.dark .video-box {
+  background: #000;
+}

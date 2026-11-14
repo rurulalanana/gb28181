@@ -2,7 +2,7 @@
   <div class="page is-fill">
 
     <div class="filter-bar">
-      <KeywordFilter v-model="keyword" placeholder="搜索名称 / 平台编码 / 地址" width="280px" />
+      <KeywordFilter v-model="keyword" placeholder="搜索名称 / 平台编码 / 地址" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -354,14 +354,14 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
+import { confirmAction } from '@biz/utils/confirm'
 import { Connection, Picture } from '@element-plus/icons-vue'
-import { cascadeApi, deviceApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import TablePager from '@/components/TablePager.vue'
-import KeywordFilter from '@/components/KeywordFilter.vue'
+import { cascadeApi, deviceApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import TablePager from '@biz/components/TablePager.vue'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 

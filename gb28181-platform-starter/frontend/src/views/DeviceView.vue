@@ -3,15 +3,12 @@
 
     <!-- 工具条：筛选在左、操作在右，一行放完（早先拆两行，白白多占竖向空间） -->
     <div class="filter-bar">
-      <el-input
+      <!-- 搜索框统一用 KeywordFilter：宽度/高度/圆角与其它页面一致（见 main.css 筛选栏控件统一） -->
+      <KeywordFilter
         v-model="query.q"
         placeholder="设备编码 / 名称"
-        clearable
-        style="width: 240px"
         @keyup.enter="search"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
+      />
       <el-select v-model="query.online" placeholder="全部状态" clearable style="width: 128px">
         <el-option label="在线" :value="true" />
         <el-option label="离线" :value="false" />
@@ -399,14 +396,15 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
+import { confirmAction } from '@biz/utils/confirm'
 import { useRouter } from 'vue-router'
-import { deviceApi, dahuaApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import TablePager from '@/components/TablePager.vue'
-import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
+import { deviceApi, dahuaApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import TablePager from '@biz/components/TablePager.vue'
+import DeviceDetailDialog from '@biz/components/DeviceDetailDialog.vue'
 
 const auth = useAuthStore()
 const router = useRouter()

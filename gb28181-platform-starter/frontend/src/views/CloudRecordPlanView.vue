@@ -229,12 +229,12 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { cloudRecordApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import TablePager from '@/components/TablePager.vue'
+import { confirmAction } from '@biz/utils/confirm'
+import { cloudRecordApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import TablePager from '@biz/components/TablePager.vue'
 
 const router = useRouter()
 const auth = useAuthStore()

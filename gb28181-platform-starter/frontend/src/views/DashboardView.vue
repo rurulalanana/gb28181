@@ -86,7 +86,7 @@ import * as echarts from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { deviceApi, metricsApi } from '@/api'
+import { deviceApi, metricsApi } from '@biz/api'
 
 echarts.use([BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -112,6 +112,16 @@ let timer = null
 /** 盯网格尺寸，窗口/全屏/侧栏变化都会改它，图表据此重算。 */
 let ro = null
 const charts = {}
+/*
+ * 主题监听。
+ *
+ * ECharts 不是 CSS：坐标轴、柱/线的颜色在 setOption 那一刻就被画进 canvas 了，
+ * 之后换深色或换主题色，图形不会自己变 —— 表现为「设置面板点了没反应，
+ * 只有刷新后图表才变色」。这里盯 <html> 的 class/style（深色=class、主题色=style
+ * 上的 --el-color-primary），变化后重建一次图表。
+ */
+let themeObserver = null
+let themeTimer = null
 
 /**
  * 组件是否已卸载。await 期间用户可能切走页面，此时图表已 dispose，
@@ -125,6 +135,17 @@ let unmounted = false
  * 销毁全部图表并清空句柄。必须清空 charts：只 dispose 不删引用的话，
  * 后续遍历（onResize 的 resize、重复卸载）会再次踩到已销毁的实例。
  */
+/** 主题变化后重建图表：颜色在 initCharts 里从 CSS 变量现取，重建才能拿到新值。 */
+function retintCharts() {
+  if (unmounted || !Object.keys(charts).length) return
+  disposeCharts()
+  nextTick(() => {
+    if (unmounted) return
+    initCharts()
+    updateCharts()
+  })
+}
+
 function disposeCharts() {
   for (const k of Object.keys(charts)) {
     const c = charts[k]
@@ -353,6 +374,16 @@ onMounted(async () => {
   // rAF 包裹是惯例 —— 在观察回调里同步改布局会触发 ResizeObserver 循环告警。
   ro = new ResizeObserver(() => requestAnimationFrame(onResize))
   if (gridRef.value) ro.observe(gridRef.value)
+  // 主题色是逐条 setProperty（1 次主色 + 11 个梯度 + 深色类），会有十几条变更记录，
+  // 防抖到一个批次里重建，避免连续 dispose/init 抖动
+  themeObserver = new MutationObserver(() => {
+    if (themeTimer) clearTimeout(themeTimer)
+    themeTimer = setTimeout(retintCharts, 150)
+  })
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['class', 'style']
+  })
   timer = setInterval(() => load(), POLL_MS)
 })
 
@@ -366,6 +397,12 @@ onUnmounted(() => {
   }
   ro?.disconnect()
   ro = null
+  themeObserver?.disconnect()
+  themeObserver = null
+  if (themeTimer) {
+    clearTimeout(themeTimer)
+    themeTimer = null
+  }
   disposeCharts()
 })
 </script>

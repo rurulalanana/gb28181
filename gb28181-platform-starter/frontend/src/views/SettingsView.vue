@@ -894,7 +894,7 @@
 import { computed, markRaw, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
+import { confirmAction } from '@biz/utils/confirm'
 import {
   Cloudy,
   CopyDocument,
@@ -907,9 +907,9 @@ import {
   RefreshRight,
   Setting
 } from '@element-plus/icons-vue'
-import { aclApi, configApi, systemApi, tlsApi, userApi, webrtcApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import HelpTip from '@/components/HelpTip.vue'
+import { aclApi, configApi, systemApi, tlsApi, userApi, webrtcApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import HelpTip from '@biz/components/HelpTip.vue'
 
 const auth = useAuthStore()
 const router = useRouter()

@@ -1,9 +1,9 @@
 <template>
-  <div>
+  <div class="page is-fill">
 
     <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
-      <KeywordFilter v-model="keyword" placeholder="搜索角色名称 / 编码 / 说明" width="280px" />
+      <KeywordFilter v-model="keyword" placeholder="搜索角色名称 / 编码 / 说明" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="loadAll">
         <el-icon><Refresh /></el-icon> 刷新
@@ -197,10 +197,10 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { roleApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import KeywordFilter from '@/components/KeywordFilter.vue'
+import { confirmAction } from '@biz/utils/confirm'
+import { roleApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 

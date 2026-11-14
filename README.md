@@ -156,20 +156,51 @@ cd gb28181-sip
 
 ### 2.4 前端
 
-```powershell
-cd gb28181-platform-starter
-npm --prefix frontend run dev          # 开发（Vite，热更新）
-npm --prefix frontend run build        # 产物直接写进 src/main/resources/static/
-```
+前端**整体就是 Vue Pure Admin**（pure-admin-thin i18n 精简国际化版）：布局、侧栏、顶栏、
+页签、面包屑、搜索、主题/外观设置面板、登录页、403/404/500、按钮级权限组件、请求与状态管理
+全部使用框架自带实现，没有另写一套壳。二次开发只做两件事——
 
-⚠️ `vite.config.js` 里 `emptyOutDir: true`，`build` 会**清空** `src/main/resources/static/`。
-前端产物是**入库的**，所以改完前端要一起提交，否则线上还是旧页面。
+| 位置 | 归属 | 说明 |
+| --- | --- | --- |
+| `src/layout` `src/router` `src/store` `src/components` `src/utils` | 框架 | 尽量不改；改过的地方都有注释说明原因 |
+| `src/views/*.vue` | 业务 | 22 个业务页面，按框架约定放在 `views/` 下，由 `gb_menu` 动态注册路由 |
+| `src/api/{user,routes}.ts` | 胶水 | 把 Sa-Token 登录与 `gb_menu` 接到框架的 `getLogin` / `getAsyncRoutes` 契约上 |
+| `src/business/**` | 业务 | 只剩非页面代码：请求客户端、播放器引擎、复合组件、composables、设计系统 `styles/main.css` |
+
+关键接缝（改前端前先读这三个文件）：
+
+- `src/api/routes.ts` —— `gb_menu` 扁平行 → 框架要的动态路由树。目录节点挂 `views/RouteShell.vue`
+  透明壳（留空会导致整页空白），叶子写 `views/Xxx.vue` 供 `import.meta.glob` 匹配。
+- `src/store/modules/user.ts` —— `loginByUsername` 调 `/api/v1/login` 拿 Sa-Token，
+  再拉 `/userinfo` 把权限点写进 store；侧栏与路由都读它。
+- `src/business/stores/auth.js` —— 业务侧门面，只提供 `can()` / `readonly` / `serverInfo`，
+  登录态的唯一真相在框架的 `useUserStore`，不要再另存一份 token。
+
+    cd gb28181-platform-starter/frontend
+    pnpm install                     # Node >= 20.19 / pnpm >= 9
+    pnpm dev                         # 开发（Vite 8848，/api /rtp 代理已在 vite.config.ts）
+    pnpm typecheck                   # tsc --noEmit + vue-tsc
+    pnpm build                       # 产物直接写进 ../src/main/resources/static/
+
+⚠️ 构建必须保留的三条约束：
+
+1. `vite.config.ts` 的 `emptyOutDir: true` 会**清空** `src/main/resources/static/`，
+   前端产物是**入库的**，改完前端要一起提交，否则线上还是旧页面。
+2. 产物路径前缀必须是 `assets/` 而不是骨架默认的 `static/`：后端
+   `SpaWebConfiguration` 的 SPA 兜底白名单没有 `static`，用默认前缀会让 JS 请求
+   被转发成 `index.html`，浏览器按脚本解析直接白屏。
+3. `index.html` 里 `/js/liveplayer-lib.min.js` 是同步 UMD 脚本，不能加 `type="module"`；
+   两个 liveplayer 文件放在 `public/js/`，构建时原样拷进产物。
+
+本地启动 WebRTC 必须加 `--gb28181.rtc-extern-ip=auto`（或显式局域网 IP），
+否则 candidate 回退成 `application.yml` 里的公网 `media-ip`，浏览器收不到回包。
+线上 NAT 部署不要加这一项。
 
 ---
 
 ## 3. 父子工程与版本号
 
-根 `pom.xml` 既是聚合（`<modules>`）又是 parent，六个模块都继承它。
+根 `pom.xml` 既是聚合（`<modules>`）又是 parent，九个模块都继承它。
 
 ### 3.1 版本号只有一个来源
 
@@ -339,11 +370,11 @@ psql -h 127.0.0.1 -U postgres -d gb28181
 
 | 端口 | 协议 | 用途 | 配置项 |
 |---|---|---|---|
-| 48092 | TCP | 平台 HTTP（线上；本地 48088） | `server.port` |
-| 5060 | UDP/TCP | 国标 SIP | `gb28181.sip-port` |
-| 24560 | TCP | ZLM RTP 收流 | `gb28181.zlm.rtp-single-port-number` |
-| 8081 / 11935 / 18554 / 18000 | TCP | ZLM HTTP / RTMP / RTSP / WebRTC | `gb28181.zlm.*` |
-| 49500 | TCP | 大华主动注册 | `dahua.server-mode.port` |
+| 48092 | TCP | 平台 HTTP（线上，由 `.env` 的 `GB_APP_PORT` 注入；本地 48088） | `server.port` |
+| 5060 | UDP/TCP | 国标 SIP（server profile 为 45060） | `gb28181.sip-port` |
+| 24560 | TCP | ZLM RTP 收流（server profile 为 44560） | `gb28181.rtp-single-port-number` |
+| 8081 / 11935 / 18554 / 18000 | TCP | ZLM HTTP / RTMP / RTSP / WebRTC（server profile 为 48089 / 41935 / 48554 / 48000） | `gb28181.http-port` 等，**无 `zlm` 层级** |
+| 9500 | TCP | 大华主动注册 | `dahua.server-mode.port` |
 | **7660** | TCP+UDP | 海康 ISUP 注册（CMS/DAS） | `hikvision.cms.port` |
 | **7665** | TCP | 海康 ISUP 取流（SMS） | `hikvision.stream.port` |
 | **7666** | TCP | 海康 ISUP 回放 | `hikvision.playback.port` |

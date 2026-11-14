@@ -18,15 +18,12 @@
         style="width: 260px"
         @change="search"
       />
-      <el-input
+      <!-- 搜索框统一用 KeywordFilter（宽 240 / 高 32 / 圆角 6，见 main.css） -->
+      <KeywordFilter
         v-model="query.keyword"
         placeholder="路径 / 远端 / 操作人"
-        clearable
-        style="width: 240px"
         @keyup.enter="search"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
+      />
       <el-button type="primary" @click="search">
         <el-icon><Search /></el-icon> 查询
       </el-button>
@@ -122,12 +119,13 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { opLogApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import TablePager from '@/components/TablePager.vue'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
+import { confirmAction } from '@biz/utils/confirm'
+import { opLogApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
+import TablePager from '@biz/components/TablePager.vue'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
 
 const auth = useAuthStore()
 

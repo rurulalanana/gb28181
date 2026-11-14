@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
 
     <!-- ============ 筛选条件 ============ -->
     <section class="filter-panel">
@@ -275,10 +275,10 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { menuApi } from '@/api'
-import { COMPONENT_OPTIONS, ICON_OPTIONS } from '@/router/routes'
-import { useAuthStore } from '@/stores/auth'
+import { confirmAction } from '@biz/utils/confirm'
+import { menuApi } from '@biz/api'
+import { COMPONENT_OPTIONS, ICON_OPTIONS } from '@biz/menu/seed'
+import { useAuthStore } from '@biz/stores/auth'
 
 const auth = useAuthStore()
 

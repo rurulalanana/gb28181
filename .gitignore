@@ -102,3 +102,7 @@ SESSION-SYNC.md
 # 这些是构建产物，来源已在 sdk-hikvision/lib/、sdk-dahua/lib/ 由 LFS 管理，
 # 这里再提交一份只会让仓库翻倍，且不同平台的文件会互相覆盖。
 gb28181-platform-starter/lib/
+
+# 前端工程（产物 static/ 是入库的，不入 ignore）
+gb28181-platform-starter/frontend/node_modules/
+gb28181-platform-starter/frontend/dist/

@@ -1,5 +1,5 @@
 <template>
-  <div class="page">
+  <div class="page is-fill">
     <el-card shadow="never" class="vision-card">
       <!-- 顶部状态条：把「能不能用」一次说清，避免用户点了才报错 -->
       <div class="vision-head">
@@ -288,9 +288,9 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { deviceApi, visionApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
+import { confirmAction } from '@biz/utils/confirm'
+import { deviceApi, visionApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
 
 const router = useRouter()
 const auth = useAuthStore()

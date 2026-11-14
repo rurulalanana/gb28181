@@ -1,8 +1,15 @@
 <template>
-  <div class="page pb-page">
+  <!--
+    列表模式才加 is-fill：时间轴模式里有固定 16:9 的播放器和 50px 时间轴，
+    强行撑满会把播放器压扁；列表模式是纯表格，天然应该吃满可用高度、在表格内部滚动。
+  -->
+  <div class="page pb-page" :class="{ 'is-fill': viewMode === 'list' }">
     <div class="pb-card">
       <!-- 标题格式对齐 CMS（LiveGBS）：设备录像时间轴(设备-通道) -->
-      <h4 class="pb-title">设备录像时间轴({{ timelineTitle }})</h4>
+      <!-- 标题跟随视图模式：列表模式下还写「时间轴」会让人以为切错了 -->
+      <h4 class="pb-title">
+        {{ viewMode === 'timeline' ? '设备录像时间轴' : '设备录像列表' }}({{ timelineTitle }})
+      </h4>
 
       <div class="pb-body">
 
@@ -85,7 +92,12 @@
           播放区对齐 CMS 的 700×394 黑底居中。控制栏用 LivePlayer 自带的，不另做一套：
           自绘控件做不到全屏/截图，还会和组件内部状态打架。
         -->
-        <div ref="playStage" class="pb-player">
+        <!--
+          播放器只在时间轴模式出现：列表模式是「翻录像文件」的场景，留一块 394px 的黑底
+          播放器会把表格挤到只剩十几行。切换模式不销毁播放器（v-show），
+          回到时间轴时能接着播、不用重新 INVITE。
+        -->
+        <div v-show="viewMode === 'timeline'" ref="playStage" class="pb-player">
           <div ref="videoContainer" class="pb-video" />
           <div v-if="!current" class="pb-no-video">No Video</div>
           <div v-if="seeking && current" class="pb-seeking">定位中…</div>
@@ -231,12 +243,12 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download, Loading, VideoPlay } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
-import { deviceApi, playbackApi, systemApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl } from '@/player/resolvePlayUrls'
-import { useLivePlayer } from '@/composables/useLivePlayer'
-import { useStreamPlayback } from '@/composables/useStreamPlayback'
-import { useDownloadStore } from '@/stores/download'
-import { useAuthStore } from '@/stores/auth'
+import { deviceApi, playbackApi, systemApi } from '@biz/api'
+import { resolvePlayUrls, hasPlayUrl } from '@biz/player/resolvePlayUrls'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
+import { useStreamPlayback } from '@biz/composables/useStreamPlayback'
+import { useDownloadStore } from '@biz/stores/download'
+import { useAuthStore } from '@biz/stores/auth'
 
 const route = useRoute()
 const router = useRouter()
@@ -1220,15 +1232,17 @@ onUnmounted(() => {
 
 <style scoped>
 /* ============================================================
-   CMS（LiveGBS）风格：尺寸与颜色取自 CMS 实际渲染值
-   （卡片 #fff/3px；按钮高 29px、字 12px；时间轴外框 #ccc 50px；游标 2px 红）。
+   CMS（LiveGBS）风格：**尺寸**取自 CMS 实际渲染值（按钮高 29px、字 12px、
+   时间轴外框 50px、游标 2px），但颜色一律走设计令牌，不再抄 CMS 的写死色值 ——
+   否则深色模式下这张卡片仍是白底、主题色换了它还是灰蓝，与整站脱节。
    ============================================================ */
 
-/* 对齐 CMS 的 .box */
+/* 对齐 CMS 的 .box，但外观用本站面板规范（圆角/描边/阴影都跟主题走） */
 .pb-card {
-  background: #fff;
-  border-radius: 3px;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.1);
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--sh-panel);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -1241,7 +1255,7 @@ onUnmounted(() => {
   font-size: 18px;
   font-weight: 500;
   text-align: center;
-  color: #333;
+  color: var(--text-primary);
   line-height: 1.1;
 }
 
@@ -1249,6 +1263,44 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/*
+ * 列表模式：让「卡片 → 主体 → 表格」一路 flex 下去。
+ *
+ * <p>element-plus 的 .el-table 默认按内容撑高，在 flex 列容器里必须
+ * `height: 0 + flex: 1` 才会把剩余高度全吃掉（否则只是内容多高就多高，
+ * 页面下方留一大片空白，还得靠外层滚动条看剩下的行）。
+ */
+.pb-page.is-fill .pb-card {
+  flex: 1;
+  min-height: 0;
+}
+
+.pb-page.is-fill .pb-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.pb-page.is-fill .pb-body > .el-table {
+  flex: 1;
+  min-height: 0;
+  height: 0;
+}
+
+/* 列表底部：条数在左、分页在右，贴住卡片底边（原来这行没有任何样式） */
+.list-footer {
+  flex-shrink: 0;
+  justify-content: space-between;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.lf-spacer {
+  flex: 1;
 }
 
 /* ==================== 工具栏 ==================== */
@@ -1299,17 +1351,18 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.5;
   border-radius: 3px;
-  border: 1px solid #ddd;
-  background: #f4f4f4;
-  color: #444;
+  border: 1px solid var(--line);
+  background: var(--bg-surface);
+  color: var(--ink-700);
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 0.12s, border-color 0.12s;
 }
 
 .cms-btn:hover:not(:disabled) {
-  background: #e6e6e6;
-  border-color: #adadad;
+  background: var(--brand-50);
+  border-color: var(--brand-300);
+  color: var(--accent-ink);
 }
 
 .cms-btn:disabled {
@@ -1317,15 +1370,19 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
+/*
+ * 主按钮用主题色（原来是固定的石板灰 #556677）：设置面板换主题色时，
+ * 「查询」这类主动作必须跟着变，否则页面里会同时出现两种强调色。
+ */
 .cms-btn-primary {
-  background: #556677;
-  border-color: #404d59;
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
   color: #fff;
 }
 
 .cms-btn-primary:hover:not(:disabled) {
-  background: #46545f;
-  border-color: #333c45;
+  background: var(--el-color-primary-dark-2);
+  border-color: var(--el-color-primary-dark-2);
 }
 
 /* 方形的翻页按钮：宽度收到最小，只放一个箭头 */
@@ -1376,18 +1433,18 @@ onUnmounted(() => {
   height: 29px;
   padding: 0 8px;
   border-radius: 3px;
-  box-shadow: 0 0 0 1px #ddd inset;
+  box-shadow: 0 0 0 1px var(--line) inset;
 }
 
 .pb-sel :deep(.el-select__wrapper.is-focused),
 .pb-sel-date :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px #556677 inset;
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
 }
 
 .pb-sel :deep(.el-select__selected-item),
 .pb-sel-date :deep(.el-input__inner) {
   font-size: 12px;
-  color: #444;
+  color: var(--ink-700);
 }
 
 /* ==================== 播放区 ==================== */
@@ -1476,7 +1533,7 @@ onUnmounted(() => {
   max-width: 1440px;
   margin: 0 auto;
   font-size: 12px;
-  background-color: #ccc;
+  background-color: var(--ink-100);
   cursor: pointer;
   user-select: none;
 }
@@ -1490,7 +1547,7 @@ onUnmounted(() => {
   height: 100%;
 }
 
-/* 288 个 × 5px（= 5 分钟）。有录像的点亮成深色，无录像的透出外框 #ccc。 */
+/* 288 个 × 5px（= 5 分钟）。有录像的点亮成主题色，无录像的透出轨道底色。 */
 .time-minute {
   float: left;
   width: 5px;
@@ -1500,7 +1557,7 @@ onUnmounted(() => {
 }
 
 .time-minute.active {
-  background-color: #404d59;
+  background-color: var(--el-color-primary);
   cursor: pointer;
 }
 
@@ -1512,9 +1569,9 @@ onUnmounted(() => {
   height: 25px;
   line-height: 25px;
   text-align: center;
-  border-left: 1px solid #999;
-  border-top: 1px solid #999;
-  color: #333;
+  border-left: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  color: var(--ink-700);
   user-select: none;
 }
 
@@ -1528,7 +1585,7 @@ onUnmounted(() => {
   top: 0;
   width: 2px;
   height: 30px;
-  background-color: red;
+  background-color: var(--danger-500);
   text-align: center;
   pointer-events: none;
 }
@@ -1542,9 +1599,9 @@ onUnmounted(() => {
   height: 15px;
   padding: 0 5px;
   line-height: 15px;
-  border: 1px solid red;
-  background-color: #fff;
-  color: #333;
+  border: 1px solid var(--danger-500);
+  background-color: var(--bg-surface);
+  color: var(--text-primary);
   white-space: nowrap;
 }
 
@@ -1555,7 +1612,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #666;
+  color: var(--text-tertiary);
   pointer-events: none;
 }
 

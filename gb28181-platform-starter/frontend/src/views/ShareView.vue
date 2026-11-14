@@ -41,9 +41,9 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { useLivePlayer } from '@/composables/useLivePlayer'
-import { usePlayerStateType } from '@/composables/usePlayerState'
-import { LIVE_DEFAULT_PROTOCOL, supportsFlv, supportsWebrtc, pickSupportedProto } from '@/player/resolvePlayUrls'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
+import { usePlayerStateType } from '@biz/composables/usePlayerState'
+import { LIVE_DEFAULT_PROTOCOL, supportsFlv, supportsWebrtc, pickSupportedProto } from '@biz/player/resolvePlayUrls'
 
 const route = useRoute()
 

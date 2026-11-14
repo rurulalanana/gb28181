@@ -10,7 +10,7 @@
         <el-option label="三级（一般）" value="3" />
         <el-option label="四级（提示）" value="4" />
       </el-select>
-      <KeywordFilter v-model="keyword" placeholder="搜索设备/通道编码 / 方式 / 描述" width="300px" />
+      <KeywordFilter v-model="keyword" placeholder="搜索设备/通道编码 / 方式 / 描述" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -79,13 +79,13 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { alarmApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import KeywordFilter from '@/components/KeywordFilter.vue'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import TablePager from '@/components/TablePager.vue'
+import { confirmAction } from '@biz/utils/confirm'
+import { alarmApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { usePagination } from '@biz/composables/usePagination'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import TablePager from '@biz/components/TablePager.vue'
 
 const auth = useAuthStore()
 

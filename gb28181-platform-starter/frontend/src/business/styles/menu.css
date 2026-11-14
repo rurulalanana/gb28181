@@ -1,0 +1,347 @@
+/*
+ * 侧栏菜单的视觉系统。
+ *
+ * <p>框架默认是「50px 行高、项与项零间距、激活项铺满主色」的老式后台观感。这里按一套
+ * 统一的度量重做：40px 行高 / 8px 圆角 / 2px 行间距 / 13.5px 字号；激活态改成
+ * 「主色 14% 底 + 左侧 3px 竖条 + 主色文字」，悬停与展开统一 160ms 过渡。
+ *
+ * <p>为什么单独一个文件而不改 `src/style/sidebar.scss`：那是框架自带文件，升级骨架时
+ * 要能整份替换；业务侧的视觉定制集中在这里，出问题一眼能定位。
+ *
+ * <p>颜色只用两类令牌：`--pure-theme-*`（导航主题）与 `--el-color-primary*`（主题色），
+ * 不写死色值，换主题色 / 切深色自动跟随。
+ *
+ * <p><b>选择器为什么要这么长</b>：框架里压着一条
+ * `body[layout=vertical] .sidebar-container .el-sub-menu .el-menu-item`（权重 0,4,1，
+ * 带 `font-size:14px` 和 `background-color:…!important`）。只写
+ * `.sidebar-container .el-menu-item`（0,2,0）根本盖不住 —— 字号会回到 14px、悬停底色
+ * 会被 `!important` 吃掉。所以这里统一用
+ * `body[layout=vertical] .sidebar-container .el-menu.el-menu--vertical …`（0,5,1），
+ * 并在框架用了 `!important` 的属性上同样加 `!important`，与加载顺序无关。
+ */
+
+.sidebar-container {
+  /* 统一度量：改这里就能整体调紧/调松，不用逐个规则改数字 */
+  --menu-row-h: 40px;
+  --menu-row-radius: 8px;
+  --menu-row-gap: 2px;
+  --menu-inset: 10px;
+  --menu-font: 13.5px;
+  --menu-icon: 17px;
+}
+
+/* 菜单整体：上下留白，避免第一项贴住 Logo、最后一项贴住折叠按钮 */
+.sidebar-container .el-menu {
+  padding: 8px 0 16px;
+  border-right: none;
+}
+
+/* ---------- 一级：目录（可展开的父项） ---------- */
+
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-sub-menu__title {
+  height: var(--menu-row-h);
+  margin: var(--menu-row-gap) var(--menu-inset);
+  padding-right: 10px;
+  font-size: var(--menu-font);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: var(--menu-row-h);
+  color: var(--pure-theme-menu-text);
+  border-radius: var(--menu-row-radius);
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+/* 框架在父项上写了 background-color: transparent !important，这里必须同样用 !important */
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-sub-menu__title:hover {
+  background-color: var(--pure-theme-menu-hover) !important;
+}
+
+/* 目录展开且其中含激活项时，父项本身也要「亮」起来 */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-sub-menu.is-active
+  > .el-sub-menu__title {
+  color: var(--pure-theme-sub-menu-active-text);
+}
+
+/* ---------- 二级：菜单项 ---------- */
+
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-menu-item {
+  height: var(--menu-row-h);
+  margin: var(--menu-row-gap) var(--menu-inset);
+  padding-right: 10px;
+  font-size: var(--menu-font);
+  font-weight: 500;
+  line-height: var(--menu-row-h);
+  color: var(--pure-theme-menu-text);
+  border-radius: var(--menu-row-radius);
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+/*
+ * 深色导航下，框架给每个子项铺了 `--pure-theme-sub-menu-bg`（近黑 #0f0303），
+ * 与侧栏底色 #001529 形成明显色差 —— 一排菜单项看起来像一排按钮，非常廉价。
+ * 浅色导航下这个色恰好等于侧栏底色，所以只有开深色才看得出来。
+ * 菜单项本身应当透明，只让 hover / active 有底色。
+ */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-sub-menu
+  .el-menu-item {
+  background-color: transparent !important;
+}
+
+/*
+ * 深色导航下，框架给每个子项铺了 `--pure-theme-sub-menu-bg`（近黑 #0f0303），
+ * 与侧栏底色 #001529 形成明显色差 —— 一排菜单项看起来像一排按钮，非常廉价。
+ * 浅色导航下这个色恰好等于侧栏底色，所以只有开深色才看得出来。
+ * 菜单项本身应当透明，只让 hover / active 有底色。
+ */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-sub-menu
+  .el-menu-item {
+  background-color: transparent !important;
+}
+
+/* 同上：框架给子菜单项设了 background-color !important，不加 !important 悬停没反应 */
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-menu-item:hover {
+  color: var(--pure-theme-menu-title-hover) !important;
+  background-color: var(--pure-theme-menu-hover) !important;
+}
+
+/*
+ * 框架在父项里写了 `div, span { height: 50px; line-height: 50px }`，
+ * 行高不跟着改的话，40px 的行里会竖着一个 50px 的盒子 —— 文字偏下、行距发虚。
+ */
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-menu-item > div,
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-menu-item span,
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-sub-menu__title > div,
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-sub-menu__title span {
+  height: var(--menu-row-h);
+  line-height: var(--menu-row-h);
+}
+
+/* ---------- 图标 ---------- */
+
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .sub-menu-icon {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+  margin-right: 10px;
+  font-size: var(--menu-icon);
+  line-height: 1;
+  opacity: 0.82;
+  transition: opacity 0.16s ease;
+}
+
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .sub-menu-icon svg {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item:hover
+  .sub-menu-icon,
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active
+  .sub-menu-icon,
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-sub-menu.is-active
+  > .el-sub-menu__title
+  .sub-menu-icon {
+  opacity: 1;
+}
+
+/* 展开箭头：默认偏淡，悬停加深；展开时跟随 Element Plus 自身的 rotate 过渡 */
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-sub-menu__icon-arrow {
+  font-size: 12px;
+  color: inherit;
+  opacity: 0.55;
+  transition:
+    transform 0.2s ease,
+    opacity 0.16s ease;
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-sub-menu__title:hover
+  .el-sub-menu__icon-arrow {
+  opacity: 0.9;
+}
+
+/* ---------- 激活态 ---------- */
+
+/*
+ * 框架原来的激活态是「整行铺满主色 + 白字」：浅色导航下是一块很重的色块，
+ * 一屏里同时有 hover 和 active 时很难分辨主次。改成
+ *   主色 14% 底 + 左侧 3px 竖条 + 主色文字
+ * 深色导航下同一套规则也成立 —— 混色会和导航底色自然叠加。
+ */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active.nest-menu::before,
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active.submenu-title-noDropdown.outer-most::before {
+  inset: 0;
+  margin: var(--menu-row-gap) var(--menu-inset);
+  background: color-mix(in srgb, var(--el-color-primary) 14%, transparent) !important;
+  border-radius: var(--menu-row-radius);
+  box-shadow: inset 3px 0 0 var(--el-color-primary);
+}
+
+/* 文字与图标压到主色；框架在这里写的是 color:#fff（只在深色导航下成立） */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active.nest-menu
+  > *,
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active.submenu-title-noDropdown.outer-most
+  > * {
+  color: var(--el-color-primary) !important;
+  font-weight: 600;
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item.is-active.nest-menu
+  .sub-menu-icon {
+  color: var(--el-color-primary) !important;
+}
+
+/* ---------- 二级分组标题（系统 → 身份与权限 / 平台运维） ---------- */
+
+/*
+ * `el-menu-item-group` 是 Element Plus 的原生结构（role="group"，键盘导航照常），
+ * 这里只把默认标题（12px、贴左边、无层次）换成「小节标签」：更小、更淡、字距拉开，
+ * 与菜单项形成明确的主次关系。
+ */
+body[layout="vertical"] .sidebar-container .el-menu.el-menu--vertical .el-menu-item-group {
+  padding: 0;
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item-group__title {
+  height: auto;
+  padding: 12px 0 4px 38px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--pure-theme-menu-text);
+  letter-spacing: 0.12em;
+  opacity: 0.62;
+}
+
+/* 第一个分组标题紧贴父项，不需要额外的上间距 */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu.el-menu--vertical
+  .el-menu-item-group:first-of-type
+  .el-menu-item-group__title {
+  padding-top: 4px;
+}
+
+/* ---------- 折叠态 ---------- */
+
+/*
+ * 折叠后只有 56px 宽，放不下分组标题和文字：标题隐藏，行高与圆角按方形按钮调，
+ * 图标居中，避免出现「半个圆角」的怪形状。
+ */
+.sidebar-container .el-menu--collapse .el-menu-item-group__title {
+  display: none;
+}
+
+.sidebar-container .el-menu--collapse .el-menu-item,
+.sidebar-container .el-menu--collapse .el-sub-menu__title {
+  height: 44px;
+  margin: 3px 8px;
+  /* 折叠后没有文字，只剩图标：清掉 EP 按层级加的左内边距，让图标在 56px 轨道里居中 */
+  padding: 0 !important;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+.sidebar-container .el-menu--collapse .sub-menu-icon {
+  margin-right: 0;
+}
+
+.sidebar-container .el-menu--collapse .el-menu-item.is-active.nest-menu::before,
+.sidebar-container
+  .el-menu--collapse
+  .el-menu-item.is-active.submenu-title-noDropdown.outer-most::before {
+  margin: 3px 8px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+/*
+ * 折叠态下的激活目录：框架只画了一条 2px 竖条，脱离圆角后看着像「贴在轨道左边缘的线」。
+ * 换成和展开态一致的「浅色底 + 主色图标」，整条轨道才是同一套语言。
+ */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu--collapse
+  .is-active.outer-most.el-sub-menu
+  > .el-sub-menu__title {
+  color: var(--el-color-primary);
+  background-color: color-mix(in srgb, var(--el-color-primary) 14%, transparent) !important;
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu--collapse
+  .is-active.outer-most.el-sub-menu
+  > .el-sub-menu__title::before {
+  display: none;
+}
+
+/*
+ * 折叠态下的激活目录：框架只画了一条 2px 竖条，脱离圆角后看着像「贴在轨道左边缘的线」。
+ * 换成和展开态一致的「浅色底 + 主色图标」，整条轨道才是同一套语言。
+ */
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu--collapse
+  .is-active.outer-most.el-sub-menu
+  > .el-sub-menu__title {
+  color: var(--el-color-primary);
+  background-color: color-mix(in srgb, var(--el-color-primary) 14%, transparent) !important;
+}
+
+body[layout="vertical"]
+  .sidebar-container
+  .el-menu--collapse
+  .is-active.outer-most.el-sub-menu
+  > .el-sub-menu__title::before {
+  display: none;
+}
+
+/* 折叠态展开的浮层子菜单：保持同样的行高与圆角，否则展开后像另一套 UI */
+.el-menu--vertical .el-menu--popup .el-menu-item {
+  height: 40px;
+  margin: 2px 6px;
+  font-size: 13.5px;
+  border-radius: 8px;
+}

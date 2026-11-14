@@ -3,16 +3,13 @@
     <el-card shadow="never">
       <!-- 工具条：搜索在左，操作在右 -->
       <div class="filter-bar">
-        <el-input
+        <!-- 搜索框统一用 KeywordFilter（宽 240 / 高 32 / 圆角 6，见 main.css） -->
+        <KeywordFilter
           v-model="query.q"
           placeholder="通道编码 / 名称"
-          clearable
-          style="width: 260px"
           @keyup.enter="search"
           @clear="search"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
+        />
         <el-button type="primary" @click="search">
           <el-icon><Search /></el-icon> 搜索
         </el-button>
@@ -111,12 +108,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { cloudRecordApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import TablePager from '@/components/TablePager.vue'
+import { confirmAction } from '@biz/utils/confirm'
+import { cloudRecordApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import TablePager from '@biz/components/TablePager.vue'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
 
 const router = useRouter()
 const auth = useAuthStore()

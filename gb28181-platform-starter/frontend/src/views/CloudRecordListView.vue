@@ -77,7 +77,7 @@
           <template #default="{ row }">
             <el-icon
               :size="18"
-              :color="row.important ? '#e6a23c' : '#c0c4cc'"
+              :color="row.important ? 'var(--warning-500)' : 'var(--text-tertiary)'"
               :class="canMark ? 'star' : ''"
               @click="canMark && toggleImportant(row)"
             >
@@ -164,12 +164,12 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { cloudRecordApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import { usePagination } from '@/composables/usePagination'
-import { useLivePlayer } from '@/composables/useLivePlayer'
+import { confirmAction } from '@biz/utils/confirm'
+import { cloudRecordApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import { usePagination } from '@biz/composables/usePagination'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
 import {
   canDownloadRecord,
   downloadRecord,
@@ -182,8 +182,8 @@ import {
   todayString,
   uploadColor,
   uploadText
-} from '@/utils/cloudRecord'
-import TablePager from '@/components/TablePager.vue'
+} from '@biz/utils/cloudRecord'
+import TablePager from '@biz/components/TablePager.vue'
 
 const route = useRoute()
 const router = useRouter()

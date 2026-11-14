@@ -247,8 +247,8 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useLivePlayer } from '@/composables/useLivePlayer'
-import { resolvePlayUrls, hasPlayUrl, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileClient } from '@/player/resolvePlayUrls'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
+import { resolvePlayUrls, hasPlayUrl, LIVE_DEFAULT_PROTOCOL, availableProtocols, isMobileClient } from '@biz/player/resolvePlayUrls'
 
 /**
  * 直播分享页（免登录）。

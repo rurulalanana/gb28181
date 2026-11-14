@@ -1,9 +1,9 @@
 <template>
-  <div>
+  <div class="page is-fill">
 
     <!-- 工具条：操作按钮靠右，与其它页保持一致 -->
     <div class="filter-bar">
-      <KeywordFilter v-model="keyword" placeholder="搜索用户名 / 昵称 / 角色" width="280px" />
+      <KeywordFilter v-model="keyword" placeholder="搜索用户名 / 昵称 / 角色" />
       <span class="filter-bar-spacer" />
       <el-button size="small" :loading="loading" @click="load">
         <el-icon><Refresh /></el-icon> 刷新
@@ -143,12 +143,12 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { confirmAction } from '@/utils/confirm'
-import { roleApi, userApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { usePagination } from '@/composables/usePagination'
-import TablePager from '@/components/TablePager.vue'
-import KeywordFilter from '@/components/KeywordFilter.vue'
+import { confirmAction } from '@biz/utils/confirm'
+import { roleApi, userApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { usePagination } from '@biz/composables/usePagination'
+import TablePager from '@biz/components/TablePager.vue'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
 
 const auth = useAuthStore()
 

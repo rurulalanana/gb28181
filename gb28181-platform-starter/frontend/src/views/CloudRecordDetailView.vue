@@ -143,9 +143,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { cloudRecordApi } from '@/api'
-import { useAuthStore } from '@/stores/auth'
-import { useLivePlayer } from '@/composables/useLivePlayer'
+import { cloudRecordApi } from '@biz/api'
+import { useAuthStore } from '@biz/stores/auth'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
 import {
   canDownloadRecord,
   downloadRecord,
@@ -158,7 +158,7 @@ import {
   todayString,
   uploadColor,
   uploadText
-} from '@/utils/cloudRecord'
+} from '@biz/utils/cloudRecord'
 
 const route = useRoute()
 const router = useRouter()

@@ -28,6 +28,14 @@
       >
         <el-icon><RefreshRight /></el-icon> {{ rotating ? '停止轮播' : '轮播' }}
       </el-button>
+      <el-button
+        size="small"
+        :class="{ 'is-on': ptzOpen }"
+        :title="ptzOpen ? '收起云台控制面板，把空间让给画面' : '展开云台控制面板'"
+        @click="togglePtz"
+      >
+        <el-icon><Operation /></el-icon> 控制面板
+      </el-button>
       <el-button size="small" title="全屏显示视频墙" @click="toggleWallFullscreen">
         <el-icon><FullScreen /></el-icon> 全屏
       </el-button>
@@ -51,7 +59,7 @@
     </div>
     <!-- 页头 -->
 
-    <div class="live-body">
+    <div class="live-body" :class="{ 'is-ptz-open': ptzOpen }">
       <!-- 左侧：设备树（对齐 LiveGBS：搜索 + 设备/通道树） -->
       <aside class="side-panel tree-panel">
         <div class="panel-head">
@@ -206,7 +214,7 @@
         </div>
       </div>
 
-      <aside class="side-panel ptz-aside">
+      <aside v-show="ptzOpen" class="side-panel ptz-aside">
         <div class="panel-head">
           <span class="panel-title">云台控制</span>
           <span v-if="ptzTile" class="ptz-target-cell">画面 {{ ptzTile.id }}</span>
@@ -308,19 +316,34 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { deviceApi, streamApi, systemApi, controlApi, visionApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@/player/resolvePlayUrls'
-import { useLivePlayer } from '@/composables/useLivePlayer'
-import { useStreamPlayback } from '@/composables/useStreamPlayback'
-import { useVision } from '@/composables/useVision'
-import PtzPanel from '@/components/PtzPanel.vue'
-import TrackBox from '@/components/TrackBox.vue'
-import VisionBox from '@/components/VisionBox.vue'
+import { deviceApi, streamApi, systemApi, controlApi, visionApi } from '@biz/api'
+import { resolvePlayUrls, hasPlayUrl, LIVE_PROTOCOLS, LIVE_DEFAULT_PROTOCOL } from '@biz/player/resolvePlayUrls'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
+import { useStreamPlayback } from '@biz/composables/useStreamPlayback'
+import { useVision } from '@biz/composables/useVision'
+import PtzPanel from '@biz/components/PtzPanel.vue'
+import TrackBox from '@biz/components/TrackBox.vue'
+import VisionBox from '@biz/components/VisionBox.vue'
 
 const channels = ref([])
 const gridSize = ref(4)
 const filterText = ref('')
 const proto = ref(LIVE_DEFAULT_PROTOCOL)
+
+/**
+ * 右侧云台控制面板是否展开。
+ *
+ * <p>默认收起：这个面板固定占 420px，开着时 4 分屏每格只剩 ~300px 宽，值班时
+ * 「看画面」是主任务、「调云台」是偶发动作，所以默认把空间全给画面。
+ * 用户主动展开后记住选择（下次进页面保持展开），避免每次都要点一次。
+ */
+const ptzOpen = ref(localStorage.getItem('gb_live_ptz_open') === '1')
+
+function togglePtz() {
+  ptzOpen.value = !ptzOpen.value
+  localStorage.setItem('gb_live_ptz_open', ptzOpen.value ? '1' : '0')
+  // 收起/展开会改中间画面宽度，播放器按容器尺寸自适应，下一帧重排即可
+}
 const mediaHttpPort = ref(null)
 
 /**
@@ -966,10 +989,16 @@ onUnmounted(() => {
    * 名称列被压成 2 个字。360px 是能在不显著挤压中间画面的前提下
    * 让表格各列都放得下完整内容的最小值。
    */
-  grid-template-columns: 248px minmax(0, 1fr) 420px;
+  /* 默认两栏：设备树 + 画面墙，云台面板收起时把 420px 全给画面 */
+  grid-template-columns: 248px minmax(0, 1fr);
   gap: var(--sp-3);
   flex: 1;
   min-height: 0;
+}
+
+/* 展开云台面板才出现第三栏（列宽定义见 .live-body 上方注释） */
+.live-body.is-ptz-open {
+  grid-template-columns: 248px minmax(0, 1fr) 420px;
 }
 
 /* 三栏固定列位：显式指定后 DOM 顺序变化不会把墙挤到侧栏位置；小屏单列时列位复位 */

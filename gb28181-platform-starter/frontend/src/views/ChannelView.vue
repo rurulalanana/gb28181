@@ -3,15 +3,12 @@
 
     <el-card shadow="never">
     <div class="filter-bar">
-      <el-input
+      <!-- 搜索框统一用 KeywordFilter（宽 240 / 高 32 / 圆角 6，见 main.css） -->
+      <KeywordFilter
         v-model="query.q"
         placeholder="通道编码 / 名称"
-        clearable
-        style="width: 220px"
         @keyup.enter="search"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
+      />
       <el-select v-model="query.online" placeholder="全部状态" clearable style="width: 130px">
         <el-option label="在线" :value="true" />
         <el-option label="离线" :value="false" />
@@ -445,20 +442,21 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
-import { deviceApi, streamApi, systemApi, visionApi } from '@/api'
-import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@/player/resolvePlayUrls'
-import { useLivePlayer } from '@/composables/useLivePlayer'
-import { useStreamPlayback } from '@/composables/useStreamPlayback'
-import { usePlayerStateType } from '@/composables/usePlayerState'
-import { usePagination } from '@/composables/usePagination'
-import { useFillTableRows } from '@/composables/useFillTableRows'
-import { useVision } from '@/composables/useVision'
-import { useAuthStore } from '@/stores/auth'
-import PtzPanel from '@/components/PtzPanel.vue'
-import TrackBox from '@/components/TrackBox.vue'
-import VisionBox from '@/components/VisionBox.vue'
-import TablePager from '@/components/TablePager.vue'
-import DeviceDetailDialog from '@/components/DeviceDetailDialog.vue'
+import { deviceApi, streamApi, systemApi, visionApi } from '@biz/api'
+import { resolvePlayUrls, hasPlayUrl, availableProtocols, LIVE_DEFAULT_PROTOCOL, isMobileClient } from '@biz/player/resolvePlayUrls'
+import { useLivePlayer } from '@biz/composables/useLivePlayer'
+import { useStreamPlayback } from '@biz/composables/useStreamPlayback'
+import { usePlayerStateType } from '@biz/composables/usePlayerState'
+import { usePagination } from '@biz/composables/usePagination'
+import { useFillTableRows } from '@biz/composables/useFillTableRows'
+import { useVision } from '@biz/composables/useVision'
+import { useAuthStore } from '@biz/stores/auth'
+import KeywordFilter from '@biz/components/KeywordFilter.vue'
+import PtzPanel from '@biz/components/PtzPanel.vue'
+import TrackBox from '@biz/components/TrackBox.vue'
+import VisionBox from '@biz/components/VisionBox.vue'
+import TablePager from '@biz/components/TablePager.vue'
+import DeviceDetailDialog from '@biz/components/DeviceDetailDialog.vue'
 
 
 const router = useRouter()
