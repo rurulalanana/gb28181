@@ -33,6 +33,21 @@ export default {
         icon: "ep/odometer",
         showLink: false
       }
+    },
+    {
+      /*
+       * 账号安全：不进侧栏（showLink:false），入口在右上角头像下拉。
+       * 走静态路由而不是 gb_menu：它属于「当前登录账号」而不是平台功能，
+       * 不该被菜单管理删掉，也不该参与权限点过滤 —— 谁登录都能改自己的密码。
+       */
+      path: "/account/security",
+      name: "AccountSecurity",
+      component: () => import("@/views/AccountSecurityView.vue"),
+      meta: {
+        title: "账号安全",
+        icon: "ep/lock",
+        showLink: false
+      }
     }
   ]
 } satisfies RouteConfigsTable;

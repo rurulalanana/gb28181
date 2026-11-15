@@ -411,6 +411,52 @@ body {
   border-color: color-mix(in srgb, var(--el-color-primary) 30%, transparent);
 }
 
+/*
+ * 轻面板：不用 el-card 的「无阴影面板」。
+ *
+ * <p>设置类页面（系统设置、账号安全）里一堆同级配置项，套 el-card 会堆阴影、
+ * 层级反而更糊；用一条描边 + 发丝分隔的平面容器，信息密度更高也更整齐。
+ * 头部高度与 `.el-card__header` 对齐（42px），两类容器在同一页里不会高低不齐。
+ */
+.panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-surface);
+}
+
+.panel--narrow {
+  max-width: 460px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 42px;
+  padding: 0 var(--sp-4);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-sunken);
+}
+
+.panel-title {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 表单/操作按钮后面那行灰色说明 */
+.form-hint {
+  margin-left: var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-500);
+}
+
 /* 参考站的 box：标题居中加粗、无分隔线（用于概览等图表/读数区） */
 .el-card.box-centered > .el-card__header {
   justify-content: center;

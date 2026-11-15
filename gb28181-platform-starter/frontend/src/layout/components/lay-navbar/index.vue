@@ -4,6 +4,7 @@ import LaySearch from "../lay-search/index.vue";
 import LayNotice from "../lay-notice/index.vue";
 import LayNavMix from "../lay-sidebar/NavMix.vue";
 import { useTranslationLang } from "@/layout/hooks/useTranslationLang";
+import { useRouter } from "vue-router";
 import LaySidebarFullScreen from "../lay-sidebar/components/SidebarFullScreen.vue";
 import LaySidebarBreadCrumb from "../lay-sidebar/components/SidebarBreadCrumb.vue";
 import LaySidebarTopCollapse from "../lay-sidebar/components/SidebarTopCollapse.vue";
@@ -11,6 +12,7 @@ import LaySidebarTopCollapse from "../lay-sidebar/components/SidebarTopCollapse.
 import GlobalizationIcon from "@/assets/svg/globalization.svg?component";
 import LogoutCircleRLine from "~icons/ri/logout-circle-r-line";
 import Setting from "~icons/ri/settings-3-line";
+import Lock from "~icons/ri/lock-2-line";
 import Check from "~icons/ep/check";
 
 const {
@@ -28,6 +30,12 @@ const {
 } = useNav();
 
 const { t, locale, translationCh, translationEn } = useTranslationLang();
+const router = useRouter();
+
+/** 账号安全是静态路由（showLink:false），地址可直接收藏 */
+function toAccountSecurity() {
+  router.push("/account/security");
+}
 </script>
 
 <template>
@@ -93,7 +101,16 @@ const { t, locale, translationCh, translationEn } = useTranslationLang();
         </span>
         <template #dropdown>
           <el-dropdown-menu class="logout">
-            <el-dropdown-item @click="logout">
+            <!--
+              账号安全（改密码 / API 密钥）放在这里而不是系统设置里：
+              它是「我的账号」的事，用户找它时第一反应是点自己的名字；
+              放进平台设置会让那一页的层级越来越长。
+            -->
+            <el-dropdown-item @click="toAccountSecurity">
+              <IconifyIconOffline :icon="Lock" style="margin: 5px" />
+              账号安全
+            </el-dropdown-item>
+            <el-dropdown-item divided @click="logout">
               <IconifyIconOffline
                 :icon="LogoutCircleRLine"
                 style="margin: 5px"

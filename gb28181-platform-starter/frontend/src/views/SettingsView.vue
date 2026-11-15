@@ -11,20 +11,23 @@
       </div>
 
       <nav class="side-nav">
-        <button
-          v-for="s in SECTIONS"
-          :key="s.key"
-          type="button"
-          class="side-item"
-          :class="{ 'is-active': active === s.key }"
-          @click="active = s.key"
-        >
-          <el-icon class="side-icon"><component :is="s.icon" /></el-icon>
-          <span class="side-label">{{ s.label }}</span>
-          <span v-if="s.key === 'config' && dirtyCount > 0" class="side-badge">
-            {{ dirtyCount }}
-          </span>
-        </button>
+        <template v-for="n in NAV_ITEMS" :key="n.type === 'group' ? 'g-' + n.label : n.key">
+          <!-- 分组小标题：把「看状态 / 改接入 / 存媒体」三段分开，扫一眼就知道去哪找 -->
+          <div v-if="n.type === 'group'" class="side-group">{{ n.label }}</div>
+          <button
+            v-else
+            type="button"
+            class="side-item"
+            :class="{ 'is-active': active === n.key }"
+            @click="active = n.key"
+          >
+            <el-icon class="side-icon"><component :is="n.icon" /></el-icon>
+            <span class="side-label">{{ n.label }}</span>
+            <span v-if="n.key === 'config' && dirtyCount > 0" class="side-badge">
+              {{ dirtyCount }}
+            </span>
+          </button>
+        </template>
       </nav>
 
       <!-- 底部放接口版本而不是运行时长：后者已在「已运行」读数里，重复没有意义 -->
@@ -732,101 +735,6 @@
         </div>
       </section>
 
-      <section v-show="active === 'security'" class="sec">
-        <header class="sec-head">
-          <div>
-            <h2 class="sec-title">账号安全</h2>
-            <p class="sec-sub">修改当前登录账号的密码</p>
-          </div>
-        </header>
-
-        <div class="panel panel--narrow">
-          <div class="panel-head">
-            <span class="panel-title">
-              修改密码
-              <HelpTip text="密码以 BCrypt(MD5(明文)) 存储。修改成功后当前登录态失效，需用新密码重新登录。" />
-            </span>
-          </div>
-          <el-form :model="pwd" label-width="92px" class="pwd-form" @submit.prevent>
-            <el-form-item label="当前密码">
-              <el-input v-model="pwd.oldpassword" type="password" show-password autocomplete="off" />
-            </el-form-item>
-            <el-form-item label="新密码">
-              <el-input
-                v-model="pwd.newpassword"
-                type="password"
-                show-password
-                autocomplete="new-password"
-              />
-            </el-form-item>
-            <el-form-item label="确认新密码">
-              <el-input
-                v-model="pwd.confirm"
-                type="password"
-                show-password
-                autocomplete="new-password"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :loading="saving" @click="changePassword">保存</el-button>
-              <span class="form-hint">修改后需重新登录</span>
-            </el-form-item>
-          </el-form>
-        </div>
-
-        <!--
-          API 密钥：给业务平台 / 脚本 / Postman 用。
-          浏览器登录要拖滑块，机器做不了，所以给每个账号一把可撤销的密钥。
-          明文只在生成时显示一次 —— 库里只存 SHA-256，服务端也拿不回来。
-        -->
-        <div class="panel panel--narrow">
-          <div class="panel-head">
-            <span class="panel-title">
-              API 密钥
-              <HelpTip text="供业务平台 / 脚本调用。登录时把密钥放进 X-Api-Key 请求头即可，不需要密码与验证码。生成后请立刻复制保存，页面不会再次显示明文。" />
-            </span>
-          </div>
-
-          <div class="apikey-body">
-            <template v-if="!apiKeyState.enabled">
-              <p class="apikey-tip">尚未生成。生成后可用于接口对接，随时可撤销。</p>
-            </template>
-            <template v-else>
-              <div class="apikey-row">
-                <span class="apikey-label">当前密钥</span>
-                <span class="mono">{{ apiKeyState.hint }}••••••••••••••••</span>
-              </div>
-              <div class="apikey-row">
-                <span class="apikey-label">生成时间</span>
-                <span>{{ apiKeyState.createdAt || '—' }}</span>
-              </div>
-            </template>
-
-            <!-- 明文只在这一块出现，刷新/关闭后不再可见 -->
-            <div v-if="newApiKey" class="apikey-new">
-              <div class="apikey-new-head">请立即复制，关闭后无法再次查看</div>
-              <div class="apikey-new-body">
-                <input class="apikey-new-input mono" :value="newApiKey" readonly @focus="$event.target.select()" />
-                <el-button size="small" @click="copyApiKey">复制</el-button>
-              </div>
-            </div>
-
-            <div class="apikey-actions">
-              <el-button
-                :type="apiKeyState.enabled ? 'default' : 'primary'"
-                :loading="apiKeyBusy"
-                @click="generateApiKey"
-              >
-                {{ apiKeyState.enabled ? '重新生成' : '生成密钥' }}
-              </el-button>
-              <el-button v-if="apiKeyState.enabled" :loading="apiKeyBusy" @click="revokeApiKey">
-                撤销
-              </el-button>
-              <span class="form-hint">重新生成或撤销后，旧密钥立即失效</span>
-            </div>
-          </div>
-        </div>
-      </section>
     </div>
 
     <el-dialog
@@ -900,14 +808,13 @@ import {
   CopyDocument,
   Filter,
   Key,
-  Lock,
   Monitor,
   Plus,
   Refresh,
   RefreshRight,
   Setting
 } from '@element-plus/icons-vue'
-import { aclApi, configApi, systemApi, tlsApi, userApi, webrtcApi } from '@biz/api'
+import { aclApi, configApi, systemApi, tlsApi, webrtcApi } from '@biz/api'
 import { useAuthStore } from '@biz/stores/auth'
 import HelpTip from '@biz/components/HelpTip.vue'
 
@@ -928,21 +835,41 @@ const canRestart = computed(() => auth.can('system:restart'))
 
 /** 图标用 markRaw 包：组件对象被转成响应式代理会带来无意义的依赖追踪开销（开发环境还告警）。 */
 const SECTIONS = [
-  { key: 'overview', label: '运行概览', icon: markRaw(Monitor) },
-  { key: 'service', label: '服务运维', icon: markRaw(RefreshRight) },
-  { key: 'config', label: '运行时配置', icon: markRaw(Setting) },
-  { key: 'acl', label: '接入控制', icon: markRaw(Filter) },
-  { key: 'tls', label: 'HTTPS 与国密', icon: markRaw(Key) },
-  { key: 'storage', label: '对象存储', icon: markRaw(Cloudy) },
-  { key: 'security', label: '账号安全', icon: markRaw(Lock) }
+  { key: 'overview', label: '运行概览', icon: markRaw(Monitor), group: '状态与运维' },
+  { key: 'service', label: '服务运维', icon: markRaw(RefreshRight), group: '状态与运维' },
+  { key: 'config', label: '运行时配置', icon: markRaw(Setting), group: '接入与安全' },
+  { key: 'acl', label: '接入控制', icon: markRaw(Filter), group: '接入与安全' },
+  { key: 'tls', label: 'HTTPS 与国密', icon: markRaw(Key), group: '接入与安全' },
+  { key: 'storage', label: '对象存储', icon: markRaw(Cloudy), group: '媒体存储' }
 ]
+
+/**
+ * 左侧导航的渲染序列：在分组变化处插一条小标题。
+ *
+ * <p>七个分区平铺成一列时，看不出「哪些是看状态的、哪些是改接入的」；
+ * 分组标题把六项切成 状态与运维 / 接入与安全 / 媒体存储 三段，
+ * 找东西时先定位段、再看项，比逐个读标签快。
+ *
+ * <p>「账号安全」已从本页移走（改密码、API 密钥是账号级的事），
+ * 入口在右上角头像下拉里。
+ */
+const NAV_ITEMS = computed(() => {
+  const out = []
+  let last = null
+  for (const section of SECTIONS) {
+    if (section.group && section.group !== last) {
+      out.push({ type: 'group', label: section.group })
+      last = section.group
+    }
+    out.push({ type: 'item', ...section })
+  }
+  return out
+})
 
 const active = ref('overview')
 
-const saving = ref(false)
 const restarting = ref(false)
 const loadingServer = ref(false)
-const pwd = reactive({ oldpassword: '', newpassword: '', confirm: '' })
 const server = computed(() => auth.serverInfo || {})
 const mediaIp = ref('')
 
@@ -1361,119 +1288,6 @@ async function restartServer() {
   }, 2500)
 }
 
-async function changePassword() {
-  if (!pwd.oldpassword || !pwd.newpassword) {
-    ElMessage.warning('请填写完整')
-    return
-  }
-  if (pwd.newpassword !== pwd.confirm) {
-    ElMessage.warning('两次输入的新密码不一致')
-    return
-  }
-  saving.value = true
-  try {
-    await systemApi.modifyPassword({
-      oldpassword: pwd.oldpassword,
-      newpassword: pwd.newpassword
-    })
-    ElMessage.success('密码已修改，请重新登录')
-    await auth.logout()
-    router.push('/login')
-  } catch (e) {
-    ElMessage.error(e.message || '修改失败')
-  } finally {
-    saving.value = false
-  }
-}
-
-/* ---------------- API 密钥 ---------------- */
-
-/** 当前密钥状态（enabled / hint / createdAt），不含明文。 */
-const apiKeyState = reactive({ enabled: false, hint: '', createdAt: '' })
-/** 刚生成的明文，仅本次操作后显示。 */
-const newApiKey = ref('')
-const apiKeyBusy = ref(false)
-
-async function loadApiKey() {
-  try {
-    const d = await userApi.apiKey()
-    apiKeyState.enabled = !!d?.enabled
-    apiKeyState.hint = d?.hint || ''
-    apiKeyState.createdAt = d?.createdAt || ''
-  } catch (e) {
-    // 密钥状态取不到不该影响其它设置项，静默即可
-  }
-}
-
-async function generateApiKey() {
-  const tip = apiKeyState.enabled
-    ? '重新生成会让当前密钥立即失效，正在使用它的对接程序会立刻无法登录。继续？'
-    : '生成后请立刻复制保存，页面不会再次显示明文。继续？'
-  if (!(await confirmAction(tip, 'API 密钥', { confirmButtonText: '生成' }))) {
-    return
-  }
-  apiKeyBusy.value = true
-  try {
-    const d = await userApi.generateApiKey()
-    newApiKey.value = d?.key || ''
-    apiKeyState.enabled = !!d?.enabled
-    apiKeyState.hint = d?.hint || ''
-    apiKeyState.createdAt = d?.createdAt || ''
-    ElMessage.success('已生成，请立刻复制')
-  } catch (e) {
-    ElMessage.error(e.message || '生成失败')
-  } finally {
-    apiKeyBusy.value = false
-  }
-}
-
-async function revokeApiKey() {
-  if (!(await confirmAction('撤销后使用该密钥的对接程序将立即无法登录。继续？', '撤销 API 密钥',
-    { confirmButtonText: '撤销' }))) {
-    return
-  }
-  apiKeyBusy.value = true
-  try {
-    await userApi.revokeApiKey()
-    newApiKey.value = ''
-    apiKeyState.enabled = false
-    apiKeyState.hint = ''
-    apiKeyState.createdAt = ''
-    ElMessage.success('已撤销')
-  } catch (e) {
-    ElMessage.error(e.message || '撤销失败')
-  } finally {
-    apiKeyBusy.value = false
-  }
-}
-
-/** 复制密钥：优先 clipboard，非安全上下文下回落 execCommand。 */
-async function copyApiKey() {
-  const text = newApiKey.value
-  if (!text) return
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      ElMessage.success('已复制')
-      return
-    }
-  } catch (e) {
-    // 落到下面的兜底
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0'
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    ta.remove()
-    ElMessage.success('已复制')
-  } catch (e) {
-    ElMessage.error('复制失败，请手动选中复制')
-  }
-}
-
 const aclLoading = ref(false)
 const aclRows = ref([])
 /** 筛选：'' 全部 / 'BLACK' / 'WHITE'。 */
@@ -1771,6 +1585,20 @@ onMounted(() => {
 }
 
 /* 分区按钮：默认只有文字色；选中时左侧一道竖线 + 浅底 */
+/* 左侧导航的分组小标题：11px + 字距，和菜单项形成主次 */
+.side-group {
+  padding: var(--sp-3) var(--sp-3) 4px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--ink-400);
+  letter-spacing: 0.12em;
+}
+
+.side-group:first-child {
+  padding-top: 0;
+}
+
 .side-item {
   position: relative;
   display: flex;
@@ -1907,40 +1735,6 @@ onMounted(() => {
 }
 
 /* 不用 el-card：设置项不需要卡片阴影堆叠，一条发丝线分隔更整齐也更省垂直空间 */
-.panel {
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--bg-surface);
-}
-
-.panel--narrow {
-  max-width: 460px;
-}
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  /* 与全局 .el-card__header 同高：两类容器在页面上是同一层级 */
-  height: 42px;
-  padding: 0 var(--sp-4);
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--bg-sunken);
-}
-
-.panel-title {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  /* 与全局 .card-title 一致：--fs-sm + 600 */
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
 /*
  * 文本型读数（如「0 天 0 小时 24 分」）。全局 .kpi-value 是给纯数字的 27px 等宽字体，
  * 中文时段放进去会被撑很宽；降到 --fs-lg 让同一行三个读数重量一致。
@@ -2201,85 +1995,11 @@ onMounted(() => {
   font-weight: 500;
 }
 
-.pwd-form {
-  padding: var(--sp-4) var(--sp-4) var(--sp-2);
-}
-
-.form-hint {
-  margin-left: var(--sp-3);
-  font-size: var(--fs-xs);
-  color: var(--ink-500);
-}
-
 /* ---------- API 密钥 ---------- */
-.apikey-body {
-  padding: var(--sp-4);
-}
-
-.apikey-tip {
-  margin: 0 0 var(--sp-3);
-  font-size: var(--fs-sm);
-  color: var(--ink-500);
-}
-
-.apikey-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  margin-bottom: var(--sp-2);
-  font-size: var(--fs-sm);
-}
-
-.apikey-label {
-  flex: none;
-  width: 72px;
-  color: var(--ink-500);
-}
-
 /*
  * 明文区块用醒目底色：它只出现这一次，用户很容易在点完「生成」后
  * 直接关页面，然后再也拿不回来。
  */
-.apikey-new {
-  margin: var(--sp-3) 0;
-  padding: var(--sp-3);
-  background: var(--bg-sunken);
-  border: 1px solid var(--brand-300, var(--line-soft));
-  border-radius: var(--r-md, 6px);
-}
-
-.apikey-new-head {
-  margin-bottom: var(--sp-2);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  color: var(--brand-600);
-}
-
-.apikey-new-body {
-  display: flex;
-  gap: var(--sp-2);
-}
-
-.apikey-new-input {
-  flex: 1;
-  min-width: 0;
-  height: 30px;
-  padding: 0 9px;
-  font-size: var(--fs-sm);
-  color: var(--text-primary);
-  background: var(--white, #fff);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm, 4px);
-  outline: none;
-}
-
-.apikey-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-}
-
 .acl-head-actions {
   display: flex;
   align-items: center;
