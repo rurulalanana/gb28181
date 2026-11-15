@@ -52,8 +52,13 @@
             <!-- 中心是拖动手柄，不响应云台指令。触摸设备靠它展开/收起六向。 -->
             <div
               class="ptz-cell ptz-center"
-              :title="ptzOpen ? '拖动可移动，点一下收起' : '点一下展开，拖动可移动'"
+              :title="
+                ptzOpen
+                  ? '拖动可移动，双击复位，点一下收起'
+                  : '点一下展开，拖动可移动，双击复位'
+              "
               @pointerdown.prevent="startDrag"
+              @dblclick="resetPtzPos"
             >
               <svg class="ptz-ico" viewBox="0 0 24 24" aria-hidden="true">
                 <path :d="PTZ_CENTER_PATH" fill="currentColor" />
@@ -800,6 +805,48 @@ function onDragMove(ev) {
   ptzPos.value = { x: Math.round(nx), y: Math.round(ny) }
 }
 
+/** 窗口缩放：rAF 合并连续事件，避免拖动条时每帧重排 */
+let resizeRaf = 0
+function onWinResize() {
+  if (resizeRaf) return
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = 0
+    clampPtzPos()
+  })
+}
+
+/**
+ * 窗口尺寸变了以后把人工拖出来的位置重新夹回画面内。
+ *
+ * <p>位置是像素值：拖到右下角后把窗口缩小，方块就会落在画面外，
+ * 而它是唯一能拖动自己的入口 —— 拖出去就再也拿不回来。
+ * 缩到放不下时直接回到默认的右上角。
+ */
+function clampPtzPos() {
+  if (!ptzPos.value) return
+  const el = ptzBlock.value
+  const stage = el?.parentElement
+  if (!el || !stage) return
+  const w = el.offsetWidth
+  const h = el.offsetHeight
+  const maxX = stage.clientWidth - w
+  const maxY = stage.clientHeight - h
+  if (maxX < 0 || maxY < 0) {
+    // 画面已经比控件还小，拖拽位置无意义
+    ptzPos.value = null
+    return
+  }
+  ptzPos.value = {
+    x: Math.round(Math.min(Math.max(0, ptzPos.value.x), maxX)),
+    y: Math.round(Math.min(Math.max(0, ptzPos.value.y), maxY))
+  }
+}
+
+/** 双击中心圆：把方块放回默认的右上角（拖歪了不用刷新页面） */
+function resetPtzPos() {
+  ptzPos.value = null
+}
+
 function endDrag() {
   // 没有位移 = 点了一下中心圆 → 切换展开态。只在真按下过时判定，避免卸载时空调用翻转状态
   if (dragOffset && !dragMoved) ptzOpen.value = !ptzOpen.value
@@ -822,6 +869,7 @@ onMounted(async () => {
   mobileMql = window.matchMedia('(max-width: 640px)')
   isMobile.value = mobileMql.matches
   mobileMql.addEventListener('change', onMobileChange)
+  window.addEventListener('resize', onWinResize)
   await load()
   buildQr()
 })
@@ -832,6 +880,7 @@ onUnmounted(() => {
   stopPtz()
   window.removeEventListener('mouseup', stopPtz)
   window.removeEventListener('blur', stopPtz)
+  window.removeEventListener('resize', onWinResize)
   if (mobileMql) {
     mobileMql.removeEventListener('change', onMobileChange)
     mobileMql = null
@@ -1019,9 +1068,21 @@ watch(ptzReady, (ok) => {
   z-index: 20;
   top: 20px;
   right: 20px;
-  width: calc(var(--ptz-step) * 3 - var(--ptz-gap));
-  /* 上方 0.2 格 + 四行格子三处间隙 + 下方 0.2 格余量 */
-  height: calc(var(--ptz-step) * 4 - var(--ptz-gap) + var(--ptz-cell) * 0.4);
+  /*
+   * 用 grid 摆六个方向键，而不是给每个格子写 top/left 魔法值。
+   *
+   * 旧写法：方块宽 = 3 格（左右两列正好贴着 16px 圆角的边缘），高 = 4.4 格
+   * （上下各留 0.2 格）。左右 0 内边距、上下 10px —— 视觉上整组按钮像是
+   * 往左偏了、被圆角切了一块。改成 grid + 四边统一 0.2 格内边距后，
+   * 十字与 +/- 天然居中，宽高都由内容撑开，不再有手算坐标。
+   */
+  display: grid;
+  grid-template-columns: repeat(3, var(--ptz-cell));
+  grid-auto-rows: var(--ptz-cell);
+  gap: var(--ptz-gap);
+  padding: calc(var(--ptz-cell) * 0.2);
+  width: max-content;
+  height: max-content;
   text-align: center;
   color: #333;
   background: rgba(237, 237, 237, 0);
@@ -1044,18 +1105,23 @@ watch(ptzReady, (ok) => {
  * 只要鼠标不在块内，画面上就只有一个半透明的中心圆。
  */
 .ptz-cell {
-  position: absolute;
   width: var(--ptz-cell);
   height: var(--ptz-cell);
   line-height: var(--ptz-cell);
   cursor: pointer;
-  display: none;
+  /*
+   * 隐藏用 visibility 而不是 display:none：格子是 grid 子项，
+   * display:none 会让它退出网格，整块在 hover 前后尺寸跳变（鼠标一抖就闪）。
+   */
+  visibility: hidden;
+  pointer-events: none;
   color: #333;
   user-select: none;
 }
 
 .ptz-block:hover .ptz-cell {
-  display: block;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 /* 按下反馈：CMS 用 active 类变白，这里用缩放更明显（画面可能是暗的） */
@@ -1077,9 +1143,9 @@ watch(ptzReady, (ok) => {
 
 /* 中心：始终显示，作为拖动柄 */
 .ptz-center {
-  top: var(--ptz-step);
-  left: var(--ptz-step);
-  display: block;
+  grid-area: 2 / 2;
+  visibility: visible;
+  pointer-events: auto;
   border-radius: calc(var(--ptz-cell) / 2);
   background: rgba(204, 204, 204, 0.2);
   cursor: move;
@@ -1098,34 +1164,27 @@ watch(ptzReady, (ok) => {
 
 /* 六个格子的位置 —— gap=0 时与 CMS 逐像素一致 */
 .ptz-up {
-  top: calc(var(--ptz-cell) * 0.2);
-  left: var(--ptz-step);
+  grid-area: 1 / 2;
 }
 
 .ptz-left {
-  top: calc(var(--ptz-step) + var(--ptz-cell) * 0.2);
-  left: 0;
+  grid-area: 2 / 1;
 }
 
 .ptz-right {
-  top: calc(var(--ptz-step) + var(--ptz-cell) * 0.2);
-  left: calc(var(--ptz-step) * 2);
+  grid-area: 2 / 3;
 }
 
 .ptz-down {
-  top: calc(var(--ptz-step) * 2 + var(--ptz-cell) * 0.2);
-  left: var(--ptz-step);
+  grid-area: 3 / 2;
 }
 
 .ptz-plus {
-  top: calc(var(--ptz-step) * 3 + var(--ptz-cell) * 0.2);
-  left: calc(var(--ptz-cell) * 0.3);
+  grid-area: 4 / 1;
 }
 
 .ptz-minus {
-  top: calc(var(--ptz-step) * 3 + var(--ptz-cell) * 0.2);
-  /* 2 格宽 − 0.3 格左边距：gap=0 时正好 1.7 格，与 plus 左右对称 */
-  left: calc(var(--ptz-step) * 2 - var(--ptz-cell) * 0.3);
+  grid-area: 4 / 3;
 }
 
 /*
@@ -1139,12 +1198,14 @@ watch(ptzReady, (ok) => {
 @media (hover: none) {
   .ptz-block:hover .ptz-cell,
   .ptz-cell {
-    display: none;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   .ptz-block .ptz-center,
   .ptz-block.is-open .ptz-cell {
-    display: block;
+    visibility: visible;
+    pointer-events: auto;
   }
 
   .ptz-block.is-open {
@@ -1448,7 +1509,8 @@ watch(ptzReady, (ok) => {
 
   /* 静态面板里方向键常显（无需 hover / 展开） */
   .ptz-mobile-host .ptz-cell {
-    display: block;
+    visibility: visible;
+    pointer-events: auto;
   }
 
   /* 中心拖动柄在静态面板里无意义，必须隐藏。
@@ -1457,7 +1519,8 @@ watch(ptzReady, (ok) => {
   .ptz-mobile-host .ptz-block .ptz-center,
   .ptz-mobile-host .ptz-block:hover .ptz-center,
   .ptz-mobile-host .ptz-block.is-open .ptz-center {
-    display: none;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   /* 浅灰底 + 内在描边，圆角按格子比例（粗边框 + 高饱和图标显得土） */
