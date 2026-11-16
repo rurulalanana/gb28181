@@ -474,11 +474,19 @@ function goPreview(row) {
 }
 
 async function remove(row) {
-  const ok = await confirmAction({
-    title: '移除检测通道',
-    message: `确定不再对「${row.name || row.channelId}」做 AI 检测吗？`,
-    confirmText: '移除'
-  })
+  /*
+   * confirmAction 是「位置参数」：(message, title, options)。
+   *
+   * 早先这里传的是对象 `{ title, message, confirmText }`，而第一个形参是 message，
+   * 于是整个对象被当成正文渲染 —— 弹框里显示的就是那串 JSON 原文。
+   * 参数形式与签名不匹配时不会报错（对象也是合法值），只能靠肉眼发现，
+   * 所以同目录的 AlarmView 用的是正确的三参数写法，可以对照。
+   */
+  const ok = await confirmAction(
+    `确定不再对「${row.name || row.channelId}」做 AI 检测吗？`,
+    '移除检测通道',
+    { confirmButtonText: '移除' }
+  )
   if (!ok) return
   try {
     await visionApi.removeChannel(row.channelId)

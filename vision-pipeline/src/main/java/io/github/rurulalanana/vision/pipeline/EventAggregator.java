@@ -58,12 +58,22 @@ public final class EventAggregator {
     }
 
     /**
-     * 喂一帧的检测结果，返回本帧<b>新触发</b>的事件（可能为空）。
+     * 喂一帧的检测结果，返回本帧的事件（开始 + 结束，可能为空）。
+     *
+     * <p>返回的列表里混有两类事件，用 {@link VisionEvent#ended()} 区分：
+     * <ul>
+     *   <li>{@code ended=false} —— 刚跨过去抖阈值，<b>新触发</b>；
+     *       同一标签在一次「出现」期间只会返回一次</li>
+     *   <li>{@code ended=true} —— 该标签<b>从本帧起消失</b>，
+     *       携带真实持续时长（首次出现 → 消失）</li>
+     * </ul>
+     * 放在同一个返回值里而不是另开一个方法：消失判定本来就要在本方法里做
+     * （它依赖本帧的标签集合），拆出去要么重复计算、要么引入跨方法状态。
      *
      * @param sourceId   来源标识
      * @param frame      当前帧
      * @param detections 本帧检测结果（已过滤阈值）
-     * @return 本帧新触发的事件；同一标签在一次「出现」期间只返回一次
+     * @return 本帧发生的事件（开始与结束）
      */
     public List<VisionEvent> accept(String sourceId, Frame frame, List<Detection> detections) {
         List<Detection> inRoi = roi.filter(detections);
@@ -92,15 +102,31 @@ public final class EventAggregator {
                         List.copyOf(e.getValue()), frame));
             }
         }
-        // 本帧消失的标签：清零（下次重新计数）
+        // 本帧消失的标签：清零，并发出「结束」事件
         Set<String> present = byLabel.keySet();
         for (Map.Entry<String, State> e : states.entrySet()) {
             String[] parts = split(e.getKey());
             if (!parts[0].equals(sourceId) || present.contains(parts[1])) {
                 continue;
             }
-            e.getValue().consecutiveFrames = 0;
-            e.getValue().fired = false;
+            State s = e.getValue();
+            /*
+             * 只有「真的报过警」的标签才发结束事件。
+             *
+             * 没跨过去抖阈值的短暂出现（一帧闪过）本来就没报警，
+             * 给它发结束事件会让业务层去找一条不存在的告警去更新。
+             *
+             * 【sustainedMs 在这里才是真实时长】now 是目标<b>消失</b>的那一帧，
+             * 减去首次出现时间就是从出现到消失的总时长。
+             * 这与开始事件里的 sustainedMs（恒等于去抖阈值的确认耗时）不是一回事。
+             */
+            if (s.fired) {
+                long total = now - s.firstSeenMs;
+                fired.add(new VisionEvent(sourceId, parts[1], s.firstSeenMs, now, total,
+                        List.of(), null, true));
+            }
+            s.consecutiveFrames = 0;
+            s.fired = false;
         }
         return fired;
     }

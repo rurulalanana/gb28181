@@ -117,6 +117,27 @@ public class DbDetectionSink implements DetectionSink {
         if (event == null || event.sourceId() == null) {
             return;
         }
+        /*
+         * 结束事件必须<b>绕过冷却</b>。
+         *
+         * 冷却的本意是「同一个目标的开始告警别刷屏」，而结束事件是
+         * 「这个事件真的结束了」的收尾信号 —— 它要回写告警的结束时间与状态。
+         * 若被冷却挡掉：一次持续 10 秒的火会报警（T+2s）后，结束信号在 T+10s
+         * 被 30 秒冷却吞掉，那条告警就永远停在 ACTIVE、没有结束时间。
+         */
+        if (event.ended()) {
+            log.info("视觉事件结束: source={} label={} 真实持续={}ms",
+                    event.sourceId(), event.label(), event.sustainedMs());
+            for (EventHandler handler : handlers) {
+                try {
+                    handler.handle(event);
+                } catch (RuntimeException e) {
+                    log.warn("视觉事件结束处理失败: handler={} {}",
+                            handler.getClass().getSimpleName(), e.getMessage());
+                }
+            }
+            return;
+        }
         String key = event.sourceId() + '\u0000' + event.label();
         long now = System.currentTimeMillis();
         Long prev = lastFired.put(key, now);
@@ -128,8 +149,11 @@ public class DbDetectionSink implements DetectionSink {
         /*
          * 这里只做「记录 + 交给后续处理器」。落库/截图/告警由
          * VisionEventRecorder 做 —— sink 保持无副作用，方便单测替换。
+         *
+         * 日志里的「确认耗时」不是目标持续时长：它恒等于去抖阈值
+         * （触发条件就是「持续 ≥ 阈值」）。真实时长要等结束事件。
          */
-        log.info("视觉事件: source={} label={} count={} conf={} 持续={}ms",
+        log.info("视觉事件: source={} label={} count={} conf={} 确认耗时={}ms",
                 event.sourceId(), event.label(), event.count(),
                 String.format("%.2f", event.maxConfidence()), event.sustainedMs());
         for (EventHandler handler : handlers) {

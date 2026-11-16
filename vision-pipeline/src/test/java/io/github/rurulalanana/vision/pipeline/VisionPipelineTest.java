@@ -6,6 +6,7 @@ import io.github.rurulalanana.vision.DetectionSink;
 import io.github.rurulalanana.vision.Frame;
 import io.github.rurulalanana.vision.VisionDetector;
 import io.github.rurulalanana.vision.VisionEvent;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -14,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -84,6 +86,82 @@ class VisionPipelineTest {
         aggregator.accept("cam", new Frame(new byte[]{1}, 10, 10, t0 + 250, "cam"), List.of());
         assertTrue(aggregator.accept("cam",
                 new Frame(new byte[]{1}, 10, 10, t0 + 300, "cam"), detections).isEmpty());
+    }
+
+    @Test
+    @DisplayName("标签消失时发出「结束」事件，携带真实持续时长")
+    void aggregatorEmitsEndedEventWithRealDuration() {
+        PipelineConfig config = new PipelineConfig(10, 4, 1, 0.5f, 3, 100L);
+        EventAggregator aggregator = new EventAggregator(config, new Roi(List.of()));
+        List<Detection> detections = List.of(
+                new Detection("fire", 0.8f, new Box(0.2f, 0.2f, 0.3f, 0.3f)));
+        long t0 = System.currentTimeMillis();
+
+        // 三帧跨过阈值 → 开始事件
+        aggregator.accept("cam", new Frame(new byte[]{1}, 10, 10, t0, "cam"), detections);
+        aggregator.accept("cam", new Frame(new byte[]{1}, 10, 10, t0 + 60, "cam"), detections);
+        List<VisionEvent> start = aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0 + 120, "cam"), detections);
+        assertEquals(1, start.size());
+        assertFalse(start.get(0).ended(), "第一帧越过阈值的是开始事件");
+        assertEquals(120, start.get(0).sustainedMs(),
+                "开始事件的 sustainedMs 只是确认耗时（≈去抖阈值），不是目标持续时长");
+
+        // 持续一段时间后目标消失
+        aggregator.accept("cam", new Frame(new byte[]{1}, 10, 10, t0 + 3000, "cam"), detections);
+        List<VisionEvent> ended = aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0 + 8000, "cam"), List.of());
+
+        assertEquals(1, ended.size(), "标签消失必须产生结束事件");
+        VisionEvent e = ended.get(0);
+        assertTrue(e.ended(), "必须标记为结束事件");
+        assertEquals("fire", e.label());
+        assertEquals(8000, e.sustainedMs(),
+                "结束事件的 sustainedMs 才是真实持续时长（首次出现 → 消失）");
+        assertEquals(t0, e.triggeredAt());
+        assertEquals(t0 + 8000, e.firedAt(), "结束事件的 firedAt 是消失时间");
+        assertTrue(e.detections().isEmpty(), "结束事件没有检测框");
+        assertNull(e.frame(), "结束事件没有帧（不该再存一张截图）");
+    }
+
+    @Test
+    @DisplayName("没跨过阈值的短暂出现不发结束事件（没报过警，无记录可回写）")
+    void aggregatorNoEndedEventWithoutFire() {
+        PipelineConfig config = new PipelineConfig(10, 4, 1, 0.5f, 3, 5000L);
+        EventAggregator aggregator = new EventAggregator(config, new Roi(List.of()));
+        List<Detection> detections = List.of(
+                new Detection("person", 0.9f, new Box(0.1f, 0.1f, 0.2f, 0.2f)));
+        long t0 = System.currentTimeMillis();
+
+        // 只出现一帧就消失：帧数不够，从未触发
+        assertTrue(aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0, "cam"), detections).isEmpty());
+        assertTrue(aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0 + 100, "cam"), List.of()).isEmpty(),
+                "没报过警的标签消失时不该发结束事件");
+    }
+
+    @Test
+    @DisplayName("结束事件能与开始事件同时出现在同一帧（一进一出）")
+    void aggregatorCanEmitStartAndEndTogether() {
+        PipelineConfig config = new PipelineConfig(10, 4, 1, 0.5f, 1, 0L);
+        EventAggregator aggregator = new EventAggregator(config, new Roi(List.of()));
+        List<Detection> fire = List.of(new Detection("fire", 0.9f, new Box(0.1f, 0.1f, 0.2f, 0.2f)));
+        List<Detection> person = List.of(new Detection("person", 0.9f, new Box(0.5f, 0.5f, 0.2f, 0.2f)));
+        long t0 = System.currentTimeMillis();
+
+        // fire 触发
+        assertEquals(1, aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0, "cam"), fire).size());
+        // 同一帧：fire 消失（结束）+ person 出现（开始）
+        List<VisionEvent> both = aggregator.accept("cam",
+                new Frame(new byte[]{1}, 10, 10, t0 + 1000, "cam"), person);
+
+        assertEquals(2, both.size(), "同一帧应同时有结束与开始事件");
+        assertEquals(1, both.stream().filter(VisionEvent::ended).count(), "一个结束");
+        assertEquals(1, both.stream().filter(v -> !v.ended()).count(), "一个开始");
+        assertTrue(both.stream().anyMatch(v -> v.ended() && "fire".equals(v.label())));
+        assertTrue(both.stream().anyMatch(v -> !v.ended() && "person".equals(v.label())));
     }
 
     @Test
