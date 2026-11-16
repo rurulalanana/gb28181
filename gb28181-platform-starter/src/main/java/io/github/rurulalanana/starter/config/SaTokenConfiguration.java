@@ -50,6 +50,10 @@ public class SaTokenConfiguration implements WebMvcConfigurer {
                         // 必须是 */* 而非 **：后者会连 snap/grab 一起放行，而抓拍要消耗设备带宽
                         // （grab 接口内部还有一次 StpUtil.checkLogin() 兜底）。
                         "/api/v1/cloudrecord/snap/*/*",
+                        // 告警事件截图：同样要能进 <img src>。
+                        // 多一层 /alarm/ 但仍是 */* —— 只放行「取一张图」，
+                        // 不能写成 /api/v1/cloudrecord/snap/**，否则把 grab 也放开了。
+                        "/api/v1/cloudrecord/snap/alarm/*/*",
                         // 设备直传抓图：设备没有登录态，且大华只能填一个 URL、
                         // 不支持自定义请求头，令牌只能放 query。
                         // 安全性由端点自身的令牌校验保证（未配令牌时它直接拒绝接收）。

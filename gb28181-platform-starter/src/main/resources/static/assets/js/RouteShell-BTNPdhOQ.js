@@ -1,0 +1,1 @@
+import{w as o,K as t,a0 as n,o as r}from"./index-DkZm2fOB.js";const p=o({name:"RouteShell",__name:"RouteShell",setup(a){return(s,_)=>{const e=t("router-view");return r(),n(e)}}});export{p as default};

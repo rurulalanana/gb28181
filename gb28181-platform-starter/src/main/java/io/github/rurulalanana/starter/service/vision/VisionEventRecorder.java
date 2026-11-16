@@ -45,32 +45,57 @@ public class VisionEventRecorder implements DbDetectionSink.EventHandler {
 
     @Override
     public void handle(VisionEvent event) {
-        String snapPath = props.isSaveSnapshot() ? saveSnapshot(event) : null;
+        /*
+         * 先定告警 ID，再用它当截图的文件名。
+         *
+         * 【为什么必须复用同一个 ID】库里 {@code snap_path} 与文件名必须能对上，
+         * 否则清理时只能靠时间戳猜。而告警 ID 本来就是这张图的唯一身份 ——
+         * 一次事件一张图，天然一一对应。
+         *
+         * 【创建顺序】ID → 存图 → 落库。反过来（先落库再存图）会出现
+         * 「记录里有路径、文件没写成功」的悬空引用；而这个顺序下即使
+         * 存图失败也只是 {@code snap_path} 为 null，记录本身仍完整。
+         */
+        String alarmId = newAlarmId();
+        String snapPath = props.isSaveSnapshot() ? saveSnapshot(event, alarmId) : null;
         if (props.isRaiseAlarm()) {
-            raiseAlarm(event, snapPath);
+            raiseAlarm(event, alarmId, snapPath);
         }
     }
 
-    /** 存事件截图。失败只记日志，不影响告警。 */
-    private String saveSnapshot(VisionEvent event) {
+    /** 告警 ID：16 位十六进制，同时用作截图文件名。 */
+    private static String newAlarmId() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /**
+     * 存事件截图。失败只记日志，不影响告警。
+     *
+     * <p><b>必须走 {@code saveEventBytes} 而不是 {@code saveBytes}</b>：
+     * 后者按「设备_通道」命名，同一通道每告警一次就覆盖同一张图 ——
+     * 实测线上 1195 条告警只对应 4 个路径，其中 1138 条挤在同一个文件上，
+     * 而且那个文件还会被 1 小时过期规则删掉，历史告警点开全是 404。
+     */
+    private String saveSnapshot(VisionEvent event, String alarmId) {
         if (event.frame() == null || event.frame().jpeg() == null) {
             return null;
         }
         try {
             String[] ids = splitKey(event.sourceId());
-            return snapService.saveBytes(ids[0], ids[1], event.frame().jpeg());
+            return snapService.saveEventBytes(ids[0], ids[1], alarmId, event.frame().jpeg());
         } catch (RuntimeException e) {
-            log.warn("视觉事件截图保存失败: source={} {}", event.sourceId(), e.getMessage());
+            log.warn("视觉事件截图保存失败: source={} alarm={} {}",
+                    event.sourceId(), alarmId, e.getMessage());
             return null;
         }
     }
 
     /** 写一条报警记录。 */
-    private void raiseAlarm(VisionEvent event, String snapPath) {
+    private void raiseAlarm(VisionEvent event, String alarmId, String snapPath) {
         try {
             String[] ids = splitKey(event.sourceId());
             GbAlarm row = new GbAlarm();
-            row.setAlarmId(UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+            row.setAlarmId(alarmId);
             row.setDeviceId(ids[0]);
             row.setChannelId(ids[1]);
             row.setMethod(METHOD_OTHER);

@@ -38,6 +38,14 @@ public class AlarmService {
 
     private final GbAlarmMapper alarmMapper;
 
+    /**
+     * 删除报警时同步删掉它的事件截图。
+     *
+     * <p>不删的话，事件截图（跟随报警保留 180 天）会在报警记录已经清掉之后
+     * 变成永久孤儿 —— 磁盘只增不减，而且没有任何入口能看到或清理它们。
+     */
+    private final SnapService snapService;
+
     // ==================== 接收 ====================
 
     /**
@@ -263,8 +271,22 @@ public class AlarmService {
         if (retainDays <= 0) {
             return 0;
         }
+        LocalDateTime deadline = LocalDateTime.now().minusDays(retainDays);
+        /*
+         * 先查出要删的行并删图，再删库。
+         *
+         * 【为什么不能先删库】删完库就拿不到 snap_path 了，图片永远留在磁盘上。
+         * 【为什么只 select snap_path】过期清理可能一次几千条，只取需要的列，
+         * 不把整行（含描述/坐标等）搬进内存。
+         */
+        List<GbAlarm> expired = alarmMapper.selectList(Wrappers.<GbAlarm>lambdaQuery()
+                .select(GbAlarm::getSnapPath)
+                .lt(GbAlarm::getStartTime, deadline));
+        for (GbAlarm a : expired) {
+            snapService.deleteEventByUrl(a.getSnapPath());
+        }
         return alarmMapper.delete(Wrappers.<GbAlarm>lambdaQuery()
-                .lt(GbAlarm::getStartTime, LocalDateTime.now().minusDays(retainDays)));
+                .lt(GbAlarm::getStartTime, deadline));
     }
 
     /** 删除报警（支持逗号分隔的多个 ID）。 */
@@ -275,8 +297,38 @@ public class AlarmService {
         }
         List<String> list = java.util.Arrays.stream(ids.split(","))
                 .map(String::trim).filter(s -> !s.isEmpty()).toList();
+        // 先删图再删库：反过来就拿不到 snap_path，图会永久留在磁盘上
+        for (GbAlarm a : alarmMapper.selectList(Wrappers.<GbAlarm>lambdaQuery()
+                .select(GbAlarm::getSnapPath)
+                .in(GbAlarm::getAlarmId, list))) {
+            snapService.deleteEventByUrl(a.getSnapPath());
+        }
         return alarmMapper.delete(Wrappers.<GbAlarm>lambdaQuery()
                 .in(GbAlarm::getAlarmId, list));
+    }
+
+    /**
+     * 库中仍被引用的<b>事件截图文件名</b>集合，供清理磁盘孤儿文件用。
+     *
+     * <p>只返回文件名（{@code {alarmId}.jpg}）而不是完整路径：
+     * 磁盘清理是按目录遍历、逐个比对文件名，比对完整路径反而要再拆一次。
+     *
+     * <p>若库里有重复引用（不该发生，但脏数据总会有），去重后只算一份。
+     *
+     * @return 文件名集合；解析不出文件名的那几条直接跳过（宁可留孤儿，也不误删）
+     */
+    public java.util.Set<String> referencedEventSnapFiles() {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (String path : alarmMapper.selectEventSnapPaths()) {
+            if (path == null) {
+                continue;
+            }
+            int idx = path.lastIndexOf('/');
+            if (idx >= 0 && idx < path.length() - 1) {
+                out.add(path.substring(idx + 1));
+            }
+        }
+        return out;
     }
 
     /**

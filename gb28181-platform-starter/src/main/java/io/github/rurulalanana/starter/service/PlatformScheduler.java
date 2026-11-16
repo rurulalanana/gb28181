@@ -26,6 +26,8 @@ public class PlatformScheduler {
 
     private final DeviceService deviceService;
     private final AlarmService alarmService;
+    /** 事件截图的孤儿清理（见 {@link #purgeUnboundedTables()}）。 */
+    private final SnapService snapService;
     /** 级联上行链路：注册 / 保活 / 重注册。 */
     private final CascadeLinkService cascadeLinkService;
     private final OperationLogService operationLogService;
@@ -319,6 +321,27 @@ public class PlatformScheduler {
             }
         } catch (Exception e) {
             log.warn("设备录像索引清理失败: {}", e.getMessage());
+        }
+        /*
+         * 孤儿事件截图清理：磁盘上有、但库里没有任何报警引用的文件。
+         *
+         * 【为什么需要这一道】删除报警时已经会同步删图，但仍会漏：
+         *   - 用户批量删报警时进程被杀（事务回滚了库、图已经删了 / 反之）
+         *   - DBA 手工 DELETE 报警行
+         *   - 写图成功、落库失败的极端时序
+         * 这些都会留下永不引用的图片。而事件截图保留 180 天，
+         * 只靠「跟着报警删」漏一次就是永久占盘。
+         *
+         * 【判据只有一份】每次都以库为准对账，不另记状态 ——
+         * 多一份状态就多一处能不一致的地方。
+         */
+        try {
+            int orphans = snapService.purgeEventOrphans(alarmService.referencedEventSnapFiles());
+            if (orphans > 0) {
+                log.info("孤儿事件截图清理：{} 个文件已删除", orphans);
+            }
+        } catch (Exception e) {
+            log.warn("孤儿事件截图清理失败: {}", e.getMessage());
         }
     }
 

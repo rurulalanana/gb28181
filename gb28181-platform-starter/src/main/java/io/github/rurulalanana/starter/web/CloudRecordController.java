@@ -544,6 +544,34 @@ public class CloudRecordController {
                 .body(data);
     }
 
+    /**
+     * 读取<b>告警事件截图</b>（AI 识别到的画面）。
+     *
+     * <p>与通道快照的区别：文件名是告警 ID 而非通道编码，所以
+     * <b>每条告警各一张、永不覆盖</b>，且不参与 1 小时过期清理
+     * （跟随报警保留期，默认 180 天）。
+     *
+     * <p>同样不校验登录态：它要能直接放进 {@code <img src>}。
+     * 路径不可枚举（告警 ID 是 16 位十六进制），且不含敏感信息。
+     */
+    @Operation(summary = "读取告警事件截图")
+    @GetMapping("/snap/alarm/{serial}/{key}.jpg")
+    public org.springframework.http.ResponseEntity<byte[]> alarmSnap(
+            @PathVariable String serial, @PathVariable String key) {
+        byte[] data = snapService.readEvent(serial, key);
+        if (data == null || data.length == 0) {
+            return org.springframework.http.ResponseEntity.notFound().build();
+        }
+        return org.springframework.http.ResponseEntity.ok()
+                .header("Content-Type", "image/jpeg")
+                /*
+                 * 事件截图是不可变的历史证据（同一 key 永远指向同一次事件），
+                 * 所以可以长缓存 —— 与通道快照的 60 秒完全不同。
+                 */
+                .header("Cache-Control", "public, max-age=86400")
+                .body(data);
+    }
+
     // ==================== 分享页 ====================
 
     /**

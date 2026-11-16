@@ -53,6 +53,38 @@
         <el-table-column label="描述" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">{{ row.alarmDescription || '—' }}</template>
         </el-table-column>
+        <!--
+          截图：AI 识别类报警的事件画面证据。
+
+          【为什么用 el-image 而不是 <img>】它自带「点开放大」的预览层，
+          且 preview-teleported 让预览层挂到 body 上 —— 否则会被表格的
+          滚动容器裁掉（表格是 overflow: hidden 的）。
+
+          【为什么要有 error 插槽】早期版本的事件截图按「设备_通道」命名并被覆盖，
+          库里 1195 条记录也有 4 个不同路径，且那些文件早已被 1 小时过期规则删掉。
+          老数据点开必然 404 —— 显示「失效」比显示一个破图标更能说明情况。
+        -->
+        <el-table-column label="截图" width="80" align="center">
+          <template #default="{ row }">
+            <el-image
+              v-if="row.snapPath"
+              :src="row.snapPath"
+              :preview-src-list="[row.snapPath]"
+              :preview-teleported="true"
+              :initial-index="0"
+              fit="cover"
+              class="alarm-snap"
+              hide-on-click-modal
+            >
+              <template #error>
+                <span class="snap-missing" title="截图文件已不存在（早期数据被覆盖或超出保留期）">
+                  失效
+                </span>
+              </template>
+            </el-image>
+            <span v-else class="text-muted">—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="56" align="center">
           <template #default="{ row }">
             <el-button v-if="canWrite" link type="danger" aria-label="删除报警" @click="removeOne(row)">
@@ -207,4 +239,26 @@ onMounted(load)
 
 <style scoped>
 /* .card-header / .search-form / .empty-cell 由 styles/main.css 统一提供 */
+
+/*
+ * 缩略图尺寸固定 56×32：表格行高是自适应的（useFillTableRows 按可容纳条数算），
+ * 用固定像素高度才不会把某一行撑高。fit="cover" 裁切而不是拉伸，
+ * 16:9 的监控画面裁成这个比例仍能看清有没有火/人。
+ */
+.alarm-snap {
+  width: 56px;
+  height: 32px;
+  border-radius: 2px;
+  background: var(--el-fill-color-light);
+  vertical-align: middle;
+  cursor: zoom-in;
+}
+
+/* 文件缺失时的占位：与「—」区分开，让用户知道「本该有图但没了」 */
+.snap-missing {
+  display: inline-block;
+  line-height: 32px;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
 </style>
