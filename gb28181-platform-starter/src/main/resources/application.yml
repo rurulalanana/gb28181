@@ -533,14 +533,43 @@ vision:
 
   # 启用的模型。id 是引用名（default-model 与日志里用）。
   # format 与 preprocess 必须配对，配错的症状见 models/MODELS.md。
+  #
+  # 【按需懒加载】这里只是「声明」，真正加载发生在某个通道第一次用到它时。
+  # 配了但没通道用 → 不占内存、不耗 CPU。
   models:
     - id: yolox-nano
       file: yolox_nano.onnx
       format: YOLOX            # [1, N, 5+C]，含 obj，坐标未解码，分数是 logits
       input-size: 416
       preprocess: yolox        # 0~255 + BGR + letterbox 填 114
+      display-name: 通用检测（小模型）
+      category: general        # 界面按用途分组：通用/人形/车辆/人脸/安全帽/烟火
       # 留空 = 用内置 COCO 80 类（person / car / ...）
       labels: []
+      estimated-ms-per-frame: 75
+
+    # 火焰 / 烟雾专用模型（2 类，非 COCO）。
+    #
+    # 【为什么必须单独一个模型】COCO 80 类里没有 fire / smoke。
+    # 通用模型无论怎么改标签都检不出火 —— 类别定义里根本没有。
+    #
+    # 【字段配对（实测确认，改错会出怪现象）】
+    #   输出 [1, 6, 2100] = 4 框 + 2 类，通道在前 → YOLO_CHANNEL_FIRST
+    #   输入 320×320，RGB、/255、直接拉伸     → yolo
+    #   2100 = 40² + 20² + 10²（320/8、16、32 三个尺度）
+    #
+    # 【框坐标量纲】Ultralytics 导出给的是「输入尺度像素」不是 0~1，
+    # 解析器会按数据自动判定，所以这里不需要额外开关。
+    - id: fire-smoke
+      file: fire_smoke_yolov8n.onnx
+      format: YOLO_CHANNEL_FIRST
+      input-size: 320
+      preprocess: yolo
+      display-name: 火焰烟雾检测
+      category: fire
+      labels: [fire, smoke]
+      only-labels: [fire, smoke]
+      estimated-ms-per-frame: 45
 
   # 默认模型 id。不填时用 models 里的第一个。
   default-model: yolox-nano
@@ -590,3 +619,43 @@ vision:
 
   # 只关心这些标签（空 = 全部）。用于「只检测人形」时过滤掉车辆等。
   labels: []
+
+  # ==================== 场景（界面上「检测能力」下拉的选项）====================
+  #
+  # 【为什么要有这一层】运维要选的是「我要检测什么」，不是「用哪个模型文件」。
+  # 同一份权重换个标签过滤就是另一种能力；而专用模型（火焰/安全帽）只对应一种能力。
+  #
+  # 【留空会怎样】不配 scenarios 时，每个模型自动派生一个「全目标检测」场景，
+  # 保证「只配了 models 也能用」。要让人看懂，就在这里写清楚。
+  scenarios:
+    - id: general
+      model-id: yolox-nano
+      name: 全目标检测
+      category: general
+      labels: []
+      description: COCO 80 类全检出（人、车、常见物体）。噪声最多，适合排查画面里到底有什么
+      estimated-ms-per-frame: 75
+
+    - id: person
+      model-id: yolox-nano
+      name: 人形检测
+      category: person
+      labels: [person]
+      description: 只保留 person。区域入侵、人员聚集都用它
+      estimated-ms-per-frame: 75
+
+    - id: vehicle
+      model-id: yolox-nano
+      name: 车辆检测
+      category: vehicle
+      labels: [car, truck, bus, motorcycle]
+      description: 四类车归并为「车辆」，用于停车场 / 道路
+      estimated-ms-per-frame: 75
+
+    - id: fire-smoke
+      model-id: fire-smoke
+      name: 火焰烟雾检测
+      category: fire
+      labels: [fire, smoke]
+      description: 专用两分类模型。火与烟同时检，烟雾常比明火先出现，是早期预警的主信号
+      estimated-ms-per-frame: 45

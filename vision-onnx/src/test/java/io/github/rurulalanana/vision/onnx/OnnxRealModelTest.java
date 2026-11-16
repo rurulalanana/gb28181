@@ -41,10 +41,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class OnnxRealModelTest {
 
-    /** 模型路径：从模块根目录解析（surefire 的 user.dir 是模块目录）。 */
+    /**
+     * 模型路径：模型在<b>仓库根目录</b>的 {@code models/}，而 surefire 的
+     * {@code user.dir} 是模块目录，所以要走 {@link TestModels#locate} 往上找一层。
+     *
+     * <p>早先这里写死 {@code Path.of("models", "yolox_nano.onnx")}，
+     * 解析到 {@code vision-onnx/models/}（不存在）→ {@code assumeTrue} 让
+     * <b>全部用例静默跳过</b>，构建一直是绿的但从未真正跑过。
+     */
     private static Path modelPath() {
-        Path p = Path.of("models", "yolox_nano.onnx");
-        return Files.isRegularFile(p) ? p : null;
+        return TestModels.locate("yolox_nano.onnx");
     }
 
     /** COCO 80 类标签（YOLOX 用的就是这套顺序）。 */

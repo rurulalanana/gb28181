@@ -114,12 +114,20 @@ public record DetectorConfig(
      * <table border="1">
      *   <tr><th>值</th><th>形状</th><th>通道含义</th><th>框坐标</th><th>需 sigmoid</th></tr>
      *   <tr><td>{@link #YOLO_CHANNEL_FIRST}</td><td>{@code [1, 4+C, N]}</td>
-     *       <td>4 框 + C 类（无 obj）</td><td>归一化 0~1</td><td>否（导出已内置）</td></tr>
+     *       <td>4 框 + C 类（无 obj）</td><td><b>输入尺度像素</b></td><td>否（导出已内置）</td></tr>
      *   <tr><td>{@link #YOLO_ANCHOR_FIRST}</td><td>{@code [1, N, 4+C]}</td>
-     *       <td>4 框 + C 类（无 obj）</td><td>归一化 0~1</td><td>否（导出已内置）</td></tr>
+     *       <td>4 框 + C 类（无 obj）</td><td><b>输入尺度像素</b></td><td>否（导出已内置）</td></tr>
      *   <tr><td>{@link #YOLOX}</td><td>{@code [1, N, 5+C]}</td>
      *       <td>4 框 + obj + C 类</td><td><b>未解码的网格偏移</b></td><td><b>是</b></td></tr>
      * </table>
+     *
+     * <p><b>框坐标是被实测纠正过的</b>：早先这里写「YOLOv8 坐标归一化 0~1」，
+     * 实际 Ultralytics 导出给的是<b>输入尺度像素</b>。实测
+     * {@code fire_smoke_yolov8n.onnx}（imgsz=320）最高分候选
+     * {@code raw = 201.2, 116.7, 51.9, 69.5}，通道 0 全局范围 7.6~314.9。
+     * 按归一化用会把框压成 {@code [1,1,1,1]} 整屏一个框。
+     * 现在 {@code YOLO_CHANNEL_FIRST} 由实现按数据自动判定量纲，
+     * 所以两种导出风格都能直接用，配错也不会出错框。
      *
      * <p><b>YOLOX 的框必须解码</b>：官方 {@code yolox_nano.onnx} 输出的是未解码的
      * head 张量，要按 {@code cx=(raw+grid)*stride, w=exp(raw)*stride} 还原。

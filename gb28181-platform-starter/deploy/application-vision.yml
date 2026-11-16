@@ -33,8 +33,34 @@ vision:
       input-size: 416
       preprocess: yolox        # 0~255 + BGR + letterbox 填 114
       labels: []               # 空 = 内置 COCO 80 类
+      display-name: 通用检测（小模型）
+      category: general
+
+    # 火焰 / 烟雾（专用两分类模型，COCO 里没有这两个类别）
+    #
+    # 四项必须一起对上，改错任一项的症状：
+    #   format 用 YOLOX        → 分数异常、框塌到左上角
+    #   input-size 不是 320    → 框整体偏移（模型是 320 训练的）
+    #   preprocess 用 yolox    → letterbox 补灰边，与训练的拉伸口径不符
+    #   labels 顺序反了        → fire 显示成 smoke
+    - id: fire-smoke
+      file: fire_smoke_yolov8n.onnx
+      format: YOLO_CHANNEL_FIRST   # [1, 6, 2100] = 4 框 + 2 类
+      input-size: 320
+      preprocess: yolo             # RGB + /255 + 直接拉伸
+      display-name: 火焰烟雾检测
+      category: fire
+      labels: [fire, smoke]
+      only-labels: [fire, smoke]
+      estimated-ms-per-frame: 45
 
   default-model: yolox-nano
+
+  # 【scenarios 不用在这里重复】
+  # 「什么能力对应哪些标签」是产品定义，不是部署环境相关的，
+  # 所以 scenarios 写在 jar 内的 application.yml 里。本文件的 models 会
+  # 覆盖那里的 models（列表整体替换），但 scenarios 没被覆盖，仍然生效。
+  # 只有「这台机器上换了别的模型 id」时才需要在这里同步改 scenarios。
 
   # 【哪些通道要检测，不写在这里】
   # 全部在平台界面维护（运维 → AI 检测），落库 gb_vision_channel。

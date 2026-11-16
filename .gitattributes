@@ -68,3 +68,10 @@
 *.woff2         binary
 *.ttf           binary
 *.eot           binary
+
+# ---------- AI 模型（ONNX）----------
+# 必须显式声明 binary：`text=auto` 虽然多数情况能识别出二进制，
+# 但一旦某次规则顺序被改动、或模型首字节恰好像文本，git 会尝试做换行归一，
+# 模型文件当场损坏 —— 表现是 onnxruntime 报 proto 解析失败或张量形状乱掉，
+# 而文件大小看起来正常，极难排查。这类文件之间也没有 diff 价值。
+*.onnx          binary

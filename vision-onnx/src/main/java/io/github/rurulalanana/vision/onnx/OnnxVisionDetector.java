@@ -430,8 +430,31 @@ public final class OnnxVisionDetector implements VisionDetector {
 
 
     /**
-     * {@code [1, 4+C, N]}：每列一个候选框，前 4 个是 cx/cy/w/h（归一化），
+     * {@code [1, 4+C, N]}：每列一个候选框，前 4 个是 cx/cy/w/h，
      * 后 C 个是各类别置信度。YOLOv8/v11 默认导出。
+     *
+     * <h3>坐标量纲必须实测判断，不能假设归一化</h3>
+     * 早先这里写死 {@code normalized=true}（「YOLOv8 给 0~1」），
+     * <b>那是错的</b>。Ultralytics 官方 ONNX 导出给的是
+     * <b>letterbox 输入尺度上的像素</b>，不是归一化值。实测
+     * {@code fire_smoke_yolov8n.onnx}（imgsz=320）的输出：
+     * <pre>
+     *   最高分类候选 raw = 201.206, 116.741, 51.866, 69.463
+     *   通道 0 全局范围   = 7.589 ~ 314.850
+     * </pre>
+     * 当归一化用会乘 {@code inputSize}（201.2 × 320 = 64384），
+     * 再除缩放比与原图宽高，全部被 {@code clamp01} 压成 1.0 ——
+     * 表现为<b>整屏一个大框 {@code [1,1,1,1]}</b>，而且因为「确实检出了」，
+     * 看起来不像 bug，极难发现。
+     *
+     * <p>仓库里一直没有真实的 YOLOv8 模型（{@code MODELS.md} 里写了
+     * 「ultralytics 官方 assets 里没有 .onnx，要自己从 .pt 导出」），
+     * 所以这条分支从未被真实模型验证过，错误假设就一直留着。
+     * 接入火焰模型（首个真实 YOLOv8 权重）时才暴露出来。
+     *
+     * <p>因此改成<b>按数据判断</b>：见 {@link #isNormalizedBoxSpace}。
+     * 这样两种导出风格（像素 / 归一化）都能正确解析，也不需要再加一个
+     * 让人填错的配置项 —— 这个参数的错法恰恰是「不报错、只出错框」。
      */
     private List<Detection> parseChannelFirst(float[][] channels) {
         int count = channels[0].length;
@@ -439,6 +462,11 @@ public final class OnnxVisionDetector implements VisionDetector {
         if (classCount <= 0) {
             log.warn("ONNX 输出通道数不足: {} <= {}", channels.length, BOX_CHANNELS);
             return List.of();
+        }
+        boolean normalized = isNormalizedBoxSpace(channels, count);
+        if (log.isDebugEnabled()) {
+            log.debug("框坐标量纲: model={} → {}",
+                    config.modelId(), normalized ? "归一化(0~1)" : "像素(输入尺度)");
         }
         List<Detection> candidates = new ArrayList<>();
         for (int i = 0; i < count; i++) {
@@ -454,12 +482,58 @@ public final class OnnxVisionDetector implements VisionDetector {
             if (bestClass < 0 || bestScore < config.confidenceThreshold()) {
                 continue;
             }
-            // YOLOv8 给的是 0~1 归一化坐标 → normalized=true
             addCandidate(candidates, bestClass, bestScore,
-                    channels[0][i], channels[1][i], channels[2][i], channels[3][i], true);
+                    channels[0][i], channels[1][i], channels[2][i], channels[3][i], normalized);
         }
         return nms(candidates, 0.45f);
     }
+
+    /**
+     * 判定 4 个框通道给的是 <b>0~1 归一化坐标</b>还是<b>输入尺度的像素</b>。
+     *
+     * <p>判据：取全部候选里框坐标的绝对值最大值。
+     * <ul>
+     *   <li>归一化坐标不可能超过约 1.2（退化预测最多略微越界）</li>
+     *   <li>像素坐标在 {@code inputSize ≥ 320} 的模型上必然出现过远大于 1 的值
+     *       （实测火焰模型最高到 314.85）</li>
+     * </ul>
+     * 两者相差两个数量级，用 {@link #NORMALIZED_BOX_MAX} 作分界不会有歧义。
+     *
+     * <p>全零输出（模型什么都没预测）会判成归一化 —— 无所谓，
+     * 那种情况下所有候选都低于阈值，不会进 {@code addCandidate}。
+     *
+     * <p>包级可见是为了能单测：这段判据错了的症状是「整屏一个大框」，
+     * 而它看起来「确实检出了东西」，从日志和界面都不容易看出是 bug。
+     *
+     * @param channels {@code [4+C][N]} 的输出张量（前 4 行是框）
+     * @param count    候选数（{@code N}）
+     */
+    static boolean isNormalizedBoxSpace(float[][] channels, int count) {
+        float max = 0f;
+        for (int c = 0; c < BOX_CHANNELS && c < channels.length; c++) {
+            float[] ch = channels[c];
+            if (ch == null) {
+                continue;
+            }
+            int n = Math.min(count, ch.length);
+            for (int i = 0; i < n; i++) {
+                float v = Math.abs(ch[i]);
+                if (v > max) {
+                    max = v;
+                }
+            }
+        }
+        return max <= NORMALIZED_BOX_MAX;
+    }
+
+    /**
+     * 归一化坐标的上界判定值：{@code > 1.5} 即认为是像素坐标。
+     *
+     * <p>不是精确的 1.0 —— 退化预测可能略微越界（如 cx=1.05），
+     * 留点余量避免把「归一化 + 轻微越界」误判成像素。
+     */
+    static final float NORMALIZED_BOX_MAX = 1.5f;
+
 
     /**
      * {@code [1, N, 5+C]} 或 {@code [1, N, 4+C]}：每行一个候选框，坐标<b>已解码</b>。
